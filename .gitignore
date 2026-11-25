@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+web/node_modules/
+web/dist/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Environment & Secrets (NEVER commit!)
+.env
+.env.*
+!.env.example
+*service-account*.json
+*firebase-adminsdk*.json
+serviceAccountKey.json
+.firebase/
+firebase-debug.log
+firestore-debug.log
+
+# Local caches & OS
+.DS_Store
+pipeline/output/
+*.log

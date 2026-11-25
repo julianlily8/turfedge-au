@@ -1,0 +1,4 @@
+{
+  "_comment": "Optional map of YYYY-MM-DD -> meeting_slug (or 'all') -> list of YouTube preview URLs. Also reads Firestore config/youtube_previews if present.",
+  "meetings": {}
+}
