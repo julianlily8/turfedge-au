@@ -9,9 +9,9 @@ from pipeline.src.engine.settlement import settle_race
 from pipeline.src.http_client import PoliteHttpClient
 
 
-def _sample_race():
+def _sample_race(field_size: int = 9):
     runners = []
-    for i in range(1, 7):
+    for i in range(1, field_size + 1):
         runners.append(
             {
                 "runner_number": i,
@@ -86,7 +86,7 @@ def test_strict_neutral_fallback_and_anti_hallucination_guard():
     weather = {"source": "BOM Hourly API", "headwind_kmh": 0.0, "wind_speed_kmh": 5.0, "rain_expected_mm": 0.0, "effect": "Calm"}
 
     scored = score_race_23pt(race, track_meta, weather)
-    assert len(scored) == 6
+    assert len(scored) == 9
     assert len(scored[0]["audit_23pt"]) == 23
 
     # Verify missing text fields are strictly 5.0 / "No data available"
@@ -247,3 +247,54 @@ def test_first_four_dividend_parsing_and_scratched_voiding():
     assert settled["win_all"]["profit"] == 0.0
     # Every SRM combo includes top_num as leg 1, so all must be voided
     assert all(s["void"] is True and s["stake"] == 0.0 and s["profit"] == 0.0 for s in settled["srm"])
+
+
+def test_exotic_field_size_short_fav_and_harville_return_gates():
+    track_meta = {"name": "Royal Randwick", "home_straight_m": 410, "turning": "Clockwise"}
+    weather = {"source": "BOM Hourly API", "headwind_kmh": 0.0, "wind_speed_kmh": 5.0, "rain_expected_mm": 0.0, "effect": "Calm"}
+
+    # 1) Small 5-runner field -> all 3 exotics skipped by field-size gate
+    small_race = _sample_race(field_size=5)
+    small_race["scored_runners"] = score_race_23pt(small_race, track_meta, weather)
+    p_small = price_and_generate_bets(small_race)
+    assert p_small["exotics"]["exacta"]["skipped"] is True
+    assert p_small["exotics"]["trifecta"]["skipped"] is True
+    assert p_small["exotics"]["first4"]["skipped"] is True
+
+    # 2) Standard 9-runner field (fav >= $2.30) -> 4 / 18 / 24 combos
+    std_race = _sample_race(field_size=9)
+    std_race["scored_runners"] = score_race_23pt(std_race, track_meta, weather)
+    p_std = price_and_generate_bets(std_race)
+    assert p_std["exotics"]["exacta"]["combinations"] == 4
+    assert p_std["exotics"]["trifecta"]["combinations"] == 18
+    assert p_std["exotics"]["first4"]["combinations"] == 24
+    assert p_std["exotics"]["exacta"]["skipped"] is False
+
+    # 3) Dominant short-priced favourite (< $2.30) in 9-runner field -> 2 / 6 / 8 banker combos
+    short_race = _sample_race(field_size=9)
+    short_race["runners"][0]["live_win"] = 1.20
+    short_race["runners"][0]["opening_win"] = 1.40
+    short_race["runners"][1]["live_win"] = 2.40
+    short_race["runners"][1]["opening_win"] = 2.60
+    for r in short_race["runners"][2:]:
+        r["live_win"] = 41.0
+        r["opening_win"] = 41.0
+    short_race["scored_runners"] = score_race_23pt(short_race, track_meta, weather)
+    p_short = price_and_generate_bets(short_race)
+    assert p_short["exotics"]["exacta"]["combinations"] == 2
+    assert p_short["exotics"]["trifecta"]["combinations"] == 6
+    assert p_short["exotics"]["first4"]["combinations"] == 8
+    # Exacta on $1.20 -> $2.40 against $41 outsiders has projected return < $12.50 -> must be skipped!
+    assert p_short["exotics"]["exacta"]["skipped"] is True
+    assert p_short["exotics"]["exacta"]["est_anchor_return"] < 12.50
+    assert "Est. return" in p_short["exotics"]["exacta"]["skip_reason"]
+
+    # Skipped exacta must NOT be staked or settled in settlement.py
+    short_race.update(p_short)
+    top_nums = [r["runner_number"] for r in short_race["top_10"][:4]]
+    results = [
+        {"position": idx + 1, "runner_number": rn, "name": f"Runner {rn}", "barrier": idx + 1, "margin_length": idx * 0.5}
+        for idx, rn in enumerate(top_nums)
+    ]
+    settled = settle_race(short_race, results, {"best_tote_win": {str(top_nums[0]): 1.4}, "exacta": 3.2})
+    assert settled["exacta"] is None

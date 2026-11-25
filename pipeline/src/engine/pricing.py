@@ -8,6 +8,15 @@ from pipeline.src.engine.scorer_23pt import load_factor_weights
 
 SRM_CORRELATION_HAIRCUT = 0.75
 UNIT_STAKE = 10.0
+SHORT_FAV_ODDS_THRESHOLD = 2.30
+TAB_EXOTIC_POOL_FACTOR = 0.79
+MIN_EXOTIC_PROJECTED_RETURN = 12.50
+
+MIN_EXOTIC_RUNNERS = {
+    "exacta": 6,
+    "trifecta": 7,
+    "first4": 8,
+}
 
 
 def _softmax_probabilities(scores: List[float], temperature: float = 0.95) -> List[float]:
@@ -273,64 +282,171 @@ def _build_srm_combos(runners: List[Dict[str, Any]], haircut: float) -> List[Dic
     return combos
 
 
+def _normalized_market_probs(runners: List[Dict[str, Any]]) -> Dict[int, float]:
+    """Return normalized live market win probabilities keyed by runner_number (fallback to model win prob)."""
+    raw: Dict[int, float] = {}
+    for r in runners:
+        rn = int(r["runner_number"])
+        lv = float(r.get("live_win") or 0.0)
+        if lv > 1.0:
+            raw[rn] = 1.0 / lv
+        else:
+            raw[rn] = max(0.005, float((r.get("probabilities") or {}).get("win") or 0.01))
+    total = sum(raw.values()) or 1.0
+    return {rn: p / total for rn, p in raw.items()}
+
+
+def _harville_ordered_prob(order: List[int], probs: Dict[int, float]) -> float:
+    """Harville conditional probability of an exact finishing order (e.g. [1st, 2nd, 3rd])."""
+    p_total = 1.0
+    remaining = 1.0
+    for rn in order:
+        pr = max(1e-5, probs.get(rn, 0.01))
+        p_total *= pr / max(remaining, 1e-5)
+        remaining -= pr
+        if remaining <= 1e-4:
+            remaining = 1e-4
+    return max(1e-6, min(0.99, p_total))
+
+
+def _build_single_exotic(
+    ex_key: str,
+    label: str,
+    legs: List[List[int]],
+    combos_count: int,
+    anchor_order: List[int],
+    n_active: int,
+    is_short_fav: bool,
+    mkt_probs: Dict[int, float],
+) -> Dict[str, Any]:
+    min_req = MIN_EXOTIC_RUNNERS[ex_key]
+    display = " / ".join(",".join(map(str, leg)) for leg in legs)
+    structure = "Banker (Short Fav)" if is_short_fav else "Standard"
+
+    if n_active < min_req:
+        return {
+            "type": label,
+            "legs": legs,
+            "combinations": combos_count,
+            "flexi_pct": 0.0,
+            "unit_stake": 0.0,
+            "display": display,
+            "structure": structure,
+            "est_anchor_div": None,
+            "est_anchor_return": None,
+            "skipped": True,
+            "skip_reason": f"Skipped: Only {n_active} active runners (min {min_req} required for {label})",
+        }
+
+    anchor_prob = _harville_ordered_prob(anchor_order, mkt_probs)
+    est_anchor_div = round(TAB_EXOTIC_POOL_FACTOR / anchor_prob, 2)
+    est_anchor_return = round(est_anchor_div * (UNIT_STAKE / max(combos_count, 1)), 2)
+    flexi_pct = round((UNIT_STAKE / max(combos_count, 1)) * 100.0, 2)
+
+    if est_anchor_return < MIN_EXOTIC_PROJECTED_RETURN:
+        fav_tag = "short fav / " if is_short_fav else ""
+        return {
+            "type": label,
+            "legs": legs,
+            "combinations": combos_count,
+            "flexi_pct": flexi_pct,
+            "unit_stake": 0.0,
+            "display": display,
+            "structure": structure,
+            "est_anchor_div": est_anchor_div,
+            "est_anchor_return": est_anchor_return,
+            "skipped": True,
+            "skip_reason": (
+                f"Skipped: Est. return ${est_anchor_return:.2f} < ${MIN_EXOTIC_PROJECTED_RETURN:.2f} min "
+                f"({fav_tag}{combos_count} combos)"
+            ),
+        }
+
+    return {
+        "type": label,
+        "legs": legs,
+        "combinations": combos_count,
+        "flexi_pct": flexi_pct,
+        "unit_stake": UNIT_STAKE,
+        "display": display,
+        "structure": structure,
+        "est_anchor_div": est_anchor_div,
+        "est_anchor_return": est_anchor_return,
+        "skipped": False,
+        "skip_reason": None,
+    }
+
+
 def _build_exotics(runners: List[Dict[str, Any]]) -> Dict[str, Any]:
     nums = [int(r["runner_number"]) for r in runners]
     n = len(nums)
+    if n < 2:
+        return {"exacta": None, "trifecta": None, "first4": None}
 
-    # Exacta: Standout top 2 / top 3 (4 combinations when n>=3)
-    exacta = None
-    if n >= 3:
-        leg1 = nums[:2]
-        leg2 = nums[:3]
-        combos = [(a, b) for a in leg1 for b in leg2 if a != b]
-        exacta = {
-            "type": "Exacta",
-            "legs": [leg1, leg2],
-            "combinations": len(combos),
-            "flexi_pct": round((UNIT_STAKE / max(len(combos), 1)) * 100.0, 2),
-            "unit_stake": UNIT_STAKE,
-            "display": f"{','.join(map(str, leg1))} / {','.join(map(str, leg2))}",
-        }
+    mkt_probs = _normalized_market_probs(runners)
 
-    # Trifecta: Top 2 / Top 4 / Top 5
-    trifecta = None
-    if n >= 4:
-        l1 = nums[:2]
-        l2 = nums[: min(4, n)]
-        l3 = nums[: min(5, n)]
-        combos = [(a, b, c) for a in l1 for b in l2 for c in l3 if len({a, b, c}) == 3]
-        trifecta = {
-            "type": "Trifecta",
-            "legs": [l1, l2, l3],
-            "combinations": len(combos),
-            "flexi_pct": round((UNIT_STAKE / max(len(combos), 1)) * 100.0, 2),
-            "unit_stake": UNIT_STAKE,
-            "display": f"{','.join(map(str, l1))} / {','.join(map(str, l2))} / {','.join(map(str, l3))}",
-        }
+    # Short-priced favourite anchored on top (< $2.30) triggers tight banker standout combos
+    top1_live = float(runners[0].get("live_win") or 0.0)
+    is_short_fav = bool(1.0 < top1_live < SHORT_FAV_ODDS_THRESHOLD)
 
-    # First 4: Top 2 / Top 4 / Top 5 / Top 6
-    first4 = None
-    if n >= 5:
-        l1 = nums[:2]
-        l2 = nums[: min(4, n)]
-        l3 = nums[: min(5, n)]
-        l4 = nums[: min(6, n)]
-        combos = [
-            (a, b, c, d)
-            for a in l1
-            for b in l2
-            for c in l3
-            for d in l4
-            if len({a, b, c, d}) == 4
-        ]
-        first4 = {
-            "type": "First 4",
-            "legs": [l1, l2, l3, l4],
-            "combinations": len(combos),
-            "flexi_pct": round((UNIT_STAKE / max(len(combos), 1)) * 100.0, 2),
-            "unit_stake": UNIT_STAKE,
-            "display": f"{','.join(map(str, l1))} / {','.join(map(str, l2))} / {','.join(map(str, l3))} / {','.join(map(str, l4))}",
-        }
+    # Exacta: Standard 1,2 / 1,2,3 (4 combos · 250%) | Short Fav 1 / 2,3 (2 combos · 500%)
+    if is_short_fav:
+        ex_legs = [nums[:1], nums[1:3]]
+    else:
+        ex_legs = [nums[:2], nums[:3]]
+    ex_combos = [(a, b) for a in ex_legs[0] for b in ex_legs[1] if a != b]
+    exacta = _build_single_exotic(
+        ex_key="exacta",
+        label="Exacta",
+        legs=ex_legs,
+        combos_count=len(ex_combos),
+        anchor_order=nums[:2],
+        n_active=n,
+        is_short_fav=is_short_fav,
+        mkt_probs=mkt_probs,
+    )
+
+    # Trifecta: Standard 1,2 / 1,2,3,4 / 1,2,3,4,5 (18 combos · 55.6%) | Short Fav 1 / 2,3,4 / 2,3,4 (6 combos · 166.7%)
+    if is_short_fav:
+        tri_legs = [nums[:1], nums[1:4], nums[1:4]]
+    else:
+        tri_legs = [nums[:2], nums[:4], nums[:5]]
+    tri_combos = [(a, b, c) for a in tri_legs[0] for b in tri_legs[1] for c in tri_legs[2] if len({a, b, c}) == 3]
+    trifecta = _build_single_exotic(
+        ex_key="trifecta",
+        label="Trifecta",
+        legs=tri_legs,
+        combos_count=len(tri_combos),
+        anchor_order=nums[:3],
+        n_active=n,
+        is_short_fav=is_short_fav,
+        mkt_probs=mkt_probs,
+    )
+
+    # First 4: Standard 1,2 / 1,2,3,4 / 1,2,3,4 / 1,2,3,4,5 (24 combos · 41.7%)
+    #          Short Fav 1 / 2,3 / 2,3,4 / 2,3,4,5 (8 combos · 125%)
+    if is_short_fav:
+        f4_legs = [nums[:1], nums[1:3], nums[1:4], nums[1:5]]
+    else:
+        f4_legs = [nums[:2], nums[:4], nums[:4], nums[:5]]
+    f4_combos = [
+        (a, b, c, d)
+        for a in f4_legs[0]
+        for b in f4_legs[1]
+        for c in f4_legs[2]
+        for d in f4_legs[3]
+        if len({a, b, c, d}) == 4
+    ]
+    first4 = _build_single_exotic(
+        ex_key="first4",
+        label="First 4",
+        legs=f4_legs,
+        combos_count=len(f4_combos),
+        anchor_order=nums[:4],
+        n_active=n,
+        is_short_fav=is_short_fav,
+        mkt_probs=mkt_probs,
+    )
 
     return {"exacta": exacta, "trifecta": trifecta, "first4": first4}
 

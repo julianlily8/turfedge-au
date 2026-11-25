@@ -626,22 +626,28 @@ export function TabProfitability({ settlements, loading = false }: Props) {
                         <td className="px-3 py-2.5">
                           <div className="flex flex-wrap gap-1.5">
                             {matchingBets.map((b) => {
-                              const pillStyle =
-                                b.status === 'W'
-                                  ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-200'
-                                  : b.status === 'VOID'
-                                  ? 'border-amber-500/35 bg-amber-500/10 text-amber-300'
-                                  : 'border-slate-800 bg-slate-950/70 text-slate-400';
+                              const isUnderStakeWin = b.status === 'W' && b.profit < 0;
+                              const pillStyle = isUnderStakeWin
+                                ? 'border-amber-500/40 bg-amber-500/15 text-amber-300'
+                                : b.status === 'W'
+                                ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-200'
+                                : b.status === 'VOID'
+                                ? 'border-amber-500/35 bg-amber-500/10 text-amber-300'
+                                : 'border-slate-800 bg-slate-950/70 text-slate-400';
                               return (
                                 <span
                                   key={b.betKey}
                                   className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold ${pillStyle}`}
-                                  title={`${b.label}: ${b.comboText}`}
+                                  title={`${b.label}: ${b.comboText}${
+                                    isUnderStakeWin ? ` (Under-stake hit: returned $${b.effectiveReturn.toFixed(2)} on $${b.stake.toFixed(0)})` : ''
+                                  }`}
                                 >
                                   <span>{b.shortTag}</span>
                                   <strong
                                     className={
-                                      b.status === 'W'
+                                      isUnderStakeWin
+                                        ? 'text-amber-300'
+                                        : b.status === 'W'
                                         ? 'text-emerald-300'
                                         : b.status === 'VOID'
                                         ? 'text-amber-300'
@@ -651,8 +657,8 @@ export function TabProfitability({ settlements, loading = false }: Props) {
                                     {b.status}
                                   </strong>
                                   {b.status === 'W' && b.effectiveReturn > 0 && (
-                                    <span className="text-emerald-300">
-                                      ${b.effectiveReturn.toFixed(0)}
+                                    <span className={isUnderStakeWin ? 'text-amber-300' : 'text-emerald-300'}>
+                                      ${b.effectiveReturn.toFixed(isUnderStakeWin ? 2 : 0)}
                                     </span>
                                   )}
                                   {b.status !== 'W' && b.officialOdds && b.status !== 'VOID' && (
@@ -705,14 +711,22 @@ export function TabProfitability({ settlements, loading = false }: Props) {
                                     <span className="font-bold text-slate-100">{b.label}</span>
                                     <span
                                       className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
-                                        b.status === 'W'
+                                        b.status === 'W' && b.profit < 0
+                                          ? 'bg-amber-500/20 text-amber-300'
+                                          : b.status === 'W'
                                           ? 'bg-emerald-500/20 text-emerald-300'
                                           : b.status === 'VOID'
                                           ? 'bg-amber-500/20 text-amber-300'
                                           : 'bg-slate-800 text-slate-400'
                                       }`}
                                     >
-                                      {b.status === 'W' ? 'WON' : b.status === 'VOID' ? 'VOID ($0)' : 'LOST'}
+                                      {b.status === 'W' && b.profit < 0
+                                        ? 'WON (UNDER STAKE)'
+                                        : b.status === 'W'
+                                        ? 'WON'
+                                        : b.status === 'VOID'
+                                        ? 'VOID ($0)'
+                                        : 'LOST'}
                                     </span>
                                   </div>
                                   <div className="mt-1 font-mono text-[11px] text-slate-200">{b.comboText}</div>

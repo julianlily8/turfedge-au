@@ -199,7 +199,7 @@ export function getLedgerBetDetails(
 
   exoticSpecs.forEach(({ key, shortTag, label }) => {
     const bet = s[key];
-    if (!bet) return;
+    if (!bet || bet.skipped || bet.stake <= 0) return;
     const isVoid = Boolean(bet.void || bet.stake <= 0);
     const oKey = overrideKey(s.settlement_id, key);
     const ov = overrides[oKey];
@@ -420,7 +420,7 @@ export function computeProfitability(
 
     (['exacta', 'trifecta', 'first4'] as const).forEach((exKey) => {
       const bet = s[exKey];
-      if (!bet || bet.void || bet.stake <= 0) return;
+      if (!bet || bet.void || bet.skipped || bet.stake <= 0) return;
       const ov = overrides[overrideKey(s.settlement_id, exKey)];
       const ret = effectiveReturn(bet.won, bet.stake, bet.return, ov, bet.flexi_pct);
       add(exKey, bet.stake, bet.won, ret, bet.void);

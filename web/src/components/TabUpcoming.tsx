@@ -498,12 +498,38 @@ export function TabUpcoming({
                   {(['exacta', 'trifecta', 'first4'] as const).map((k) => {
                     const ex = activeRace.exotics?.[k];
                     if (!ex) return null;
+                    if (ex.skipped) {
+                      return (
+                        <div
+                          key={k}
+                          className="rounded-xl border border-slate-800/80 bg-slate-950/40 px-3 py-2 opacity-75"
+                        >
+                          <div className="flex items-center justify-between gap-2 text-xs">
+                            <span className="font-semibold text-slate-400">{ex.type}</span>
+                            <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-bold uppercase text-amber-300 ring-1 ring-amber-500/30">
+                              SKIP · LOW PAYOUT
+                            </span>
+                          </div>
+                          <p className="mt-1 text-[11px] text-slate-500">
+                            {ex.skip_reason || 'Skipped: Projected return below $12.50 minimum.'}
+                          </p>
+                        </div>
+                      );
+                    }
                     return (
                       <div key={k} className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2">
-                        <div className="flex items-center justify-between text-xs">
-                          <span className="font-bold text-amber-300">{ex.type}</span>
+                        <div className="flex flex-wrap items-center justify-between gap-1 text-xs">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-bold text-amber-300">{ex.type}</span>
+                            {ex.structure && ex.structure.includes('Banker') && (
+                              <span className="rounded bg-sky-500/15 px-1.5 py-0.2 text-[9px] font-bold uppercase text-sky-300">
+                                BANKER
+                              </span>
+                            )}
+                          </div>
                           <span className="text-[11px] text-slate-400 tabular-nums">
                             {ex.combinations} combos · {ex.flexi_pct.toFixed(1)}% flexi
+                            {ex.est_anchor_return ? ` · Est ~$${ex.est_anchor_return.toFixed(0)}` : ''}
                           </span>
                         </div>
                         <div className="mt-0.5 font-mono text-xs font-semibold text-slate-100">{ex.display}</div>

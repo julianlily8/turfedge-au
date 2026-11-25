@@ -154,9 +154,9 @@ def settle_race(
     exotics = race.get("exotics") or {}
     exotic_settlements: Dict[str, Any] = {}
 
-    # Exacta ($10 flexi)
+    # Exacta ($10 flexi — never stake or count skipped low-payout/small-field exotics)
     ex = exotics.get("exacta")
-    if ex and len(top4_order) >= 2:
+    if ex and not ex.get("skipped") and float(ex.get("unit_stake", UNIT_STAKE)) > 0 and len(top4_order) >= 2:
         l1, l2 = ex["legs"][0], ex["legs"][1]
         won = (top4_order[0] in l1) and (top4_order[1] in l2)
         div = float(dividends.get("exacta") or 0.0)
@@ -175,9 +175,9 @@ def settle_race(
             "profit": round(ret - UNIT_STAKE, 2),
         }
 
-    # Trifecta ($10 flexi)
+    # Trifecta ($10 flexi — skip if gated out)
     tri = exotics.get("trifecta")
-    if tri and len(top4_order) >= 3:
+    if tri and not tri.get("skipped") and float(tri.get("unit_stake", UNIT_STAKE)) > 0 and len(top4_order) >= 3:
         l1, l2, l3 = tri["legs"][0], tri["legs"][1], tri["legs"][2]
         won = (top4_order[0] in l1) and (top4_order[1] in l2) and (top4_order[2] in l3)
         div = float(dividends.get("trifecta") or 0.0)
@@ -196,9 +196,9 @@ def settle_race(
             "profit": round(ret - UNIT_STAKE, 2),
         }
 
-    # First 4 ($10 flexi)
+    # First 4 ($10 flexi — skip if gated out)
     f4 = exotics.get("first4")
-    if f4 and len(top4_order) >= 4:
+    if f4 and not f4.get("skipped") and float(f4.get("unit_stake", UNIT_STAKE)) > 0 and len(top4_order) >= 4:
         l1, l2, l3, l4 = f4["legs"][0], f4["legs"][1], f4["legs"][2], f4["legs"][3]
         won = (
             (top4_order[0] in l1)

@@ -369,8 +369,92 @@ export function scoreManualRace(input: ManualRaceInput): RaceDoc {
   }
 
   const nums = scored.map((r) => r.runner_number);
+  const nActive = nums.length;
   const slug = input.meeting_name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
   const todayStr = input.date || new Date().toISOString().slice(0, 10);
+
+  // Market-implied normalized win probs for Harville anchor return estimation (0.79 TAB pool factor)
+  const rawExMkt = scored.map((r) => (r.live_win > 1 ? 1 / r.live_win : Math.max(0.005, r.probabilities.win)));
+  const exMktSum = rawExMkt.reduce((a, b) => a + b, 0) || 1;
+  const mktProbByNum = new Map<number, number>();
+  scored.forEach((r, idx) => mktProbByNum.set(r.runner_number, rawExMkt[idx] / exMktSum));
+
+  const harvilleOrderProb = (order: number[]) => {
+    let p = 1;
+    let rem = 1;
+    for (const rn of order) {
+      const pr = Math.max(1e-5, mktProbByNum.get(rn) ?? 0.01);
+      p *= pr / Math.max(rem, 1e-5);
+      rem = Math.max(1e-4, rem - pr);
+    }
+    return Math.max(1e-6, Math.min(0.99, p));
+  };
+
+  const isShortFav = Boolean(scored[0] && scored[0].live_win > 1 && scored[0].live_win < 2.3);
+  const buildLocalExotic = (
+    type: string,
+    minRunners: number,
+    legs: number[][],
+    combosCount: number,
+    anchor: number[]
+  ) => {
+    const display = legs.map((l) => l.join(',')).join(' / ');
+    const structure = isShortFav ? 'Banker (Short Fav)' : 'Standard';
+    if (nActive < minRunners) {
+      return {
+        type,
+        legs,
+        combinations: combosCount,
+        flexi_pct: 0,
+        unit_stake: 0,
+        display,
+        structure,
+        est_anchor_div: null,
+        est_anchor_return: null,
+        skipped: true,
+        skip_reason: `Skipped: Only ${nActive} active runners (min ${minRunners} required for ${type})`,
+      };
+    }
+    const estDiv = Math.round((0.79 / harvilleOrderProb(anchor)) * 100) / 100;
+    const estRet = Math.round(estDiv * (10 / Math.max(combosCount, 1)) * 100) / 100;
+    const flexiPct = Math.round((10 / Math.max(combosCount, 1)) * 10000) / 100;
+    if (estRet < 12.5) {
+      return {
+        type,
+        legs,
+        combinations: combosCount,
+        flexi_pct: flexiPct,
+        unit_stake: 0,
+        display,
+        structure,
+        est_anchor_div: estDiv,
+        est_anchor_return: estRet,
+        skipped: true,
+        skip_reason: `Skipped: Est. return $${estRet.toFixed(2)} < $12.50 min (${isShortFav ? 'short fav / ' : ''}${combosCount} combos)`,
+      };
+    }
+    return {
+      type,
+      legs,
+      combinations: combosCount,
+      flexi_pct: flexiPct,
+      unit_stake: 10,
+      display,
+      structure,
+      est_anchor_div: estDiv,
+      est_anchor_return: estRet,
+      skipped: false,
+      skip_reason: null,
+    };
+  };
+
+  const exLegs = isShortFav ? [nums.slice(0, 1), nums.slice(1, 3)] : [nums.slice(0, 2), nums.slice(0, 3)];
+  const triLegs = isShortFav
+    ? [nums.slice(0, 1), nums.slice(1, 4), nums.slice(1, 4)]
+    : [nums.slice(0, 2), nums.slice(0, 4), nums.slice(0, 5)];
+  const f4Legs = isShortFav
+    ? [nums.slice(0, 1), nums.slice(1, 3), nums.slice(1, 4), nums.slice(1, 5)]
+    : [nums.slice(0, 2), nums.slice(0, 4), nums.slice(0, 4), nums.slice(0, 5)];
 
   return {
     race_id: `manual-${slug}-r${input.race_number}-${Date.now()}`,
@@ -430,39 +514,9 @@ export function scoreManualRace(input: ManualRaceInput): RaceDoc {
     top_10,
     srm_combos,
     exotics: {
-      exacta:
-        nums.length >= 3
-          ? {
-              type: 'Exacta',
-              legs: [nums.slice(0, 2), nums.slice(0, 3)],
-              combinations: 4,
-              flexi_pct: 250,
-              unit_stake: 10,
-              display: `${nums.slice(0, 2).join(',')} / ${nums.slice(0, 3).join(',')}`,
-            }
-          : null,
-      trifecta:
-        nums.length >= 4
-          ? {
-              type: 'Trifecta',
-              legs: [nums.slice(0, 2), nums.slice(0, 4), nums.slice(0, Math.min(5, nums.length))],
-              combinations: 18,
-              flexi_pct: 55.56,
-              unit_stake: 10,
-              display: `${nums.slice(0, 2).join(',')} / ${nums.slice(0, 4).join(',')} / ${nums.slice(0, Math.min(5, nums.length)).join(',')}`,
-            }
-          : null,
-      first4:
-        nums.length >= 5
-          ? {
-              type: 'First 4',
-              legs: [nums.slice(0, 2), nums.slice(0, 4), nums.slice(0, 5), nums.slice(0, Math.min(6, nums.length))],
-              combinations: 36,
-              flexi_pct: 27.78,
-              unit_stake: 10,
-              display: `${nums.slice(0, 2).join(',')} / ${nums.slice(0, 4).join(',')} / ${nums.slice(0, 5).join(',')} / ${nums.slice(0, Math.min(6, nums.length)).join(',')}`,
-            }
-          : null,
+      exacta: nActive >= 2 ? buildLocalExotic('Exacta', 6, exLegs, isShortFav ? 2 : 4, nums.slice(0, 2)) : null,
+      trifecta: nActive >= 3 ? buildLocalExotic('Trifecta', 7, triLegs, isShortFav ? 6 : 18, nums.slice(0, 3)) : null,
+      first4: nActive >= 4 ? buildLocalExotic('First 4', 8, f4Legs, isShortFav ? 8 : 24, nums.slice(0, 4)) : null,
     },
     pre_jump_analyzed: true,
     is_manual_upload: true,

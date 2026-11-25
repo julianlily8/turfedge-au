@@ -116,6 +116,11 @@ export interface ExoticTicket {
   flexi_pct: number;
   unit_stake: number;
   display: string;
+  structure?: string;
+  est_anchor_div?: number | null;
+  est_anchor_return?: number | null;
+  skipped?: boolean;
+  skip_reason?: string | null;
 }
 
 export interface WeatherInfo {
@@ -278,6 +283,7 @@ export interface SettledExoticBet {
   stake: number;
   won: boolean;
   void?: boolean;
+  skipped?: boolean;
   dividend: number | null;
   actual_odds_override?: number | null;
   return: number;
