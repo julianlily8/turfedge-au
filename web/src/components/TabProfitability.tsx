@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   ResponsiveContainer,
   LineChart,
@@ -9,7 +9,18 @@ import {
   CartesianGrid,
   Legend,
 } from 'recharts';
-import { SlidersHorizontal, TrendingUp, DollarSign, Target, Edit3, RotateCcw, AlertTriangle } from 'lucide-react';
+import {
+  SlidersHorizontal,
+  TrendingUp,
+  DollarSign,
+  Target,
+  Edit3,
+  RotateCcw,
+  AlertTriangle,
+  ChevronDown,
+  ChevronUp,
+  Trophy,
+} from 'lucide-react';
 import type { SettlementDoc } from '../lib/types';
 import {
   COMBINED_CATEGORY_OPTIONS,
@@ -17,8 +28,8 @@ import {
   computeProfitability,
   filterSettlements,
   formatOrdinal,
+  getLedgerBetDetails,
   loadOddsOverrides,
-  overrideKey,
   saveOddsOverrides,
   type OddsOverrideMap,
   type ProfitabilityFilters,
@@ -29,6 +40,19 @@ interface Props {
   loading?: boolean;
 }
 
+const LEDGER_BET_FILTERS: { key: string; label: string }[] = [
+  { key: 'all', label: 'All' },
+  { key: 'win_all', label: 'Win' },
+  { key: 'win_overlay', label: 'Win Overlay' },
+  { key: 'srm_2leg', label: '2-Leg SRM' },
+  { key: 'srm_3leg', label: '3-Leg SRM' },
+  { key: 'srm_4leg', label: '4-Leg SRM' },
+  { key: 'exacta', label: 'Exacta' },
+  { key: 'trifecta', label: 'Trifecta' },
+  { key: 'first4', label: 'First 4' },
+  { key: 'quaddie', label: 'Quaddie' },
+];
+
 export function TabProfitability({ settlements, loading = false }: Props) {
   const [filters, setFilters] = useState<ProfitabilityFilters>({
     trackCondition: 'All',
@@ -37,8 +61,10 @@ export function TabProfitability({ settlements, loading = false }: Props) {
     tier: 'All',
   });
   const [overrides, setOverrides] = useState<OddsOverrideMap>(() => loadOddsOverrides());
-  // Default Combined KPI rollup to Win (All) only so simultaneous bet types don't distort single-unit P/L
   const [selectedCombinedKeys, setSelectedCombinedKeys] = useState<string[]>(['win_all']);
+  const [ledgerBetFilter, setLedgerBetFilter] = useState<string>('all');
+  const [wonOnly, setWonOnly] = useState<boolean>(false);
+  const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
 
   const toggleCombinedKey = (key: string) => {
     setSelectedCombinedKeys((prev) =>
@@ -52,14 +78,28 @@ export function TabProfitability({ settlements, loading = false }: Props) {
     [filtered, overrides, selectedCombinedKeys]
   );
 
-  const updateOverride = (settlementId: string, betKey: string, val: string) => {
-    const key = overrideKey(settlementId, betKey);
+  const ledgerRows = useMemo(() => {
+    return filtered
+      .map((s) => {
+        const allBets = getLedgerBetDetails(s, overrides);
+        const matchingBets =
+          ledgerBetFilter === 'all' ? allBets : allBets.filter((b) => b.betKey === ledgerBetFilter);
+        return { settlement: s, allBets, matchingBets };
+      })
+      .filter(({ matchingBets }) => {
+        if (matchingBets.length === 0) return false;
+        if (wonOnly) return matchingBets.some((b) => b.status === 'W');
+        return true;
+      });
+  }, [filtered, overrides, ledgerBetFilter, wonOnly]);
+
+  const updateOverrideByKey = (oKey: string, val: string) => {
     const next = { ...overrides };
     const num = Number(val);
     if (!val.trim() || Number.isNaN(num) || num <= 0) {
-      delete next[key];
+      delete next[oKey];
     } else {
-      next[key] = num;
+      next[oKey] = num;
     }
     setOverrides(next);
     saveOddsOverrides(next);
@@ -72,13 +112,15 @@ export function TabProfitability({ settlements, loading = false }: Props) {
 
   const winAll = stats.categories.find((c) => c.key === 'win_all');
   const winOverlay = stats.categories.find((c) => c.key === 'win_overlay');
+  const liveFactorCount = stats.factorDiagnostics.filter((f) => f.hasLiveData).length;
+  const neutralFactorCount = stats.factorDiagnostics.length - liveFactorCount;
 
   if (!loading && settlements.length === 0) {
     return (
       <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-10 text-center">
         <h2 className="text-base font-bold text-white">No Settled Races in Firestore Yet</h2>
         <p className="mx-auto mt-2 max-w-md text-xs text-slate-400">
-          Only races that complete T-25m pre-jump analysis are settled here. Once races finish,{' '}
+          Only races that complete Gemini analysis are settled here. Once races finish,{' '}
           <code>post-race-settle.yml</code> automatically records official tote dividends and Betfair BSPs every 45 minutes.
         </p>
       </div>
@@ -318,14 +360,14 @@ export function TabProfitability({ settlements, loading = false }: Props) {
         </div>
       </div>
 
-      {/* Cumulative P/L Chart + Factor Attribution */}
+      {/* Cumulative P/L Chart + All-23 Factor Attribution */}
       <div className="grid gap-4 lg:grid-cols-12">
-        <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 lg:col-span-7">
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 lg:col-span-6">
           <h3 className="mb-3 text-sm font-bold text-white">Cumulative Net P/L Curve ($10 Units)</h3>
           {stats.cumulative.length === 0 ? (
             <p className="py-12 text-center text-xs text-slate-500">No settled bets match the current filters.</p>
           ) : (
-            <div className="h-64 w-full">
+            <div className="h-72 w-full">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={stats.cumulative}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
@@ -350,82 +392,142 @@ export function TabProfitability({ settlements, loading = false }: Props) {
           )}
         </div>
 
-        {/* 23-Factor Weight Tuning Diagnostics */}
-        <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 lg:col-span-5">
+        {/* All-23 Factor Attribution (Never silently omits neutral factors) */}
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 lg:col-span-6">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-sm font-bold text-white">Factor Attribution (Weight Tuning)</h3>
-            {stats.totalWinCount < MIN_SAMPLE_WINS_FOR_TUNING && (
-              <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/15 px-2.5 py-0.5 text-[10px] font-bold text-amber-300">
-                <AlertTriangle className="h-3 w-3" /> Sample Too Small ({stats.totalWinCount}/{MIN_SAMPLE_WINS_FOR_TUNING} Wins)
+            <h3 className="text-sm font-bold text-white">23-Factor Attribution (Weight Tuning)</h3>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-bold text-emerald-300">
+                {liveFactorCount} LIVE
               </span>
-            )}
+              <span className="rounded-full bg-slate-800 px-2 py-0.5 text-[10px] font-bold text-slate-400">
+                {neutralFactorCount} NEUTRAL 5.0
+              </span>
+              {stats.totalWinCount < MIN_SAMPLE_WINS_FOR_TUNING && (
+                <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-[10px] font-bold text-amber-300">
+                  <AlertTriangle className="h-3 w-3" /> {stats.totalWinCount}/{MIN_SAMPLE_WINS_FOR_TUNING} Wins
+                </span>
+              )}
+            </div>
           </div>
           <p className="mb-2.5 mt-1 text-[11px] text-slate-400">
-            Delta ≥ +0.5 → Boost · −0.5 to +0.5 → Keep · ≤ −0.5 → Trim (<code>factor_weights.json</code>).
+            All 23 factors shown. Signals stay <strong>Low Sample</strong> until 100+ wins; then Δ ≥ +0.5 → Boost, ≤ −0.5 → Trim.
           </p>
-          <div className="max-h-60 overflow-y-auto pr-1">
+          <div className="max-h-72 overflow-y-auto pr-1">
             <table className="w-full text-left text-[11px]">
               <thead className="sticky top-0 bg-slate-900 text-slate-400">
                 <tr>
-                  <th className="py-1.5">Factor</th>
+                  <th className="py-1.5">Factor (23)</th>
+                  <th className="py-1.5">Source</th>
                   <th className="py-1.5 text-right">Win vs Loss</th>
                   <th className="py-1.5 text-right">Signal</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60 tabular-nums">
-                {stats.factorDiagnostics
-                  .filter((f) => f.sampleCount > 0)
-                  .map((f) => (
-                    <tr key={f.key} className={stats.totalWinCount < MIN_SAMPLE_WINS_FOR_TUNING ? 'opacity-80' : ''}>
-                      <td className="py-1.5 font-medium text-slate-200">{f.label}</td>
-                      <td className="py-1.5 text-right text-slate-300">
-                        {f.avgWinScore.toFixed(1)} vs {f.avgLossScore.toFixed(1)}{' '}
-                        <span className={f.edgeDelta >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
-                          ({f.edgeDelta >= 0 ? '+' : ''}
-                          {f.edgeDelta.toFixed(1)})
+                {stats.factorDiagnostics.map((f) => (
+                  <tr key={f.key} className={!f.hasLiveData ? 'opacity-65' : ''}>
+                    <td className="py-1.5 pr-2 font-medium text-slate-200">{f.label}</td>
+                    <td className="py-1.5 pr-2">
+                      {f.hasLiveData ? (
+                        <span className="rounded bg-emerald-500/15 px-1.5 py-0.2 text-[9px] font-bold uppercase text-emerald-300 ring-1 ring-emerald-500/30">
+                          LIVE
                         </span>
-                      </td>
-                      <td className="py-1.5 text-right">
-                        <span
-                          className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
-                            f.recommendation === 'Boost Weight'
-                              ? 'bg-emerald-500/20 text-emerald-300'
-                              : f.recommendation === 'Trim Weight'
-                              ? 'bg-rose-500/20 text-rose-300'
-                              : 'bg-slate-800 text-slate-400'
-                          }`}
-                        >
-                          {f.recommendation}
+                      ) : (
+                        <span className="rounded bg-slate-800 px-1.5 py-0.2 text-[9px] font-bold uppercase text-slate-400 ring-1 ring-slate-700">
+                          NEUTRAL 5.0
                         </span>
-                      </td>
-                    </tr>
-                  ))}
+                      )}
+                    </td>
+                    <td className="py-1.5 pr-2 text-right text-slate-300">
+                      {f.avgWinScore.toFixed(1)} vs {f.avgLossScore.toFixed(1)}{' '}
+                      <span
+                        className={
+                          !f.hasLiveData
+                            ? 'text-slate-500'
+                            : f.edgeDelta >= 0
+                            ? 'text-emerald-400'
+                            : 'text-rose-400'
+                        }
+                      >
+                        ({f.edgeDelta >= 0 ? '+' : ''}
+                        {f.edgeDelta.toFixed(1)})
+                      </span>
+                    </td>
+                    <td className="py-1.5 text-right">
+                      <span
+                        className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                          f.recommendation === 'Boost Weight'
+                            ? 'bg-emerald-500/20 text-emerald-300'
+                            : f.recommendation === 'Trim Weight'
+                            ? 'bg-rose-500/20 text-rose-300'
+                            : 'bg-slate-800 text-slate-400'
+                        }`}
+                      >
+                        {f.recommendation}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
         </div>
       </div>
 
-      {/* Settled Ledger with Manual Actual-Odds Overrides */}
+      {/* Settled Bets Ledger — All 9 Bet Types, Filters & Expandable Overrides */}
       <div className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/70">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 px-4 py-3">
-          <div>
-            <h3 className="flex items-center gap-1.5 text-sm font-bold text-white">
-              <Edit3 className="h-4 w-4 text-emerald-400" /> Settled Bets Ledger &amp; Manual Actual-Odds Overrides
-            </h3>
-            <p className="text-xs text-slate-400">
-              Override any settled Win, SRM (0.75x est.), or Exotic dividend with your actual bookmaker payout odds; saved locally and reflected instantly above.
-            </p>
+        <div className="border-b border-slate-800 px-4 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 className="flex items-center gap-1.5 text-sm font-bold text-white">
+                <Edit3 className="h-4 w-4 text-emerald-400" /> Settled Bets Ledger &amp; Manual Actual-Dividend Overrides
+              </h3>
+              <p className="text-xs text-slate-400">
+                Click any row to inspect full combos/returns and override actual bookmaker odds or exotic dividends for all 9 bet types.
+              </p>
+            </div>
+            {Object.keys(overrides).length > 0 && (
+              <button
+                type="button"
+                onClick={resetAllOverrides}
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-700"
+              >
+                <RotateCcw className="h-3.5 w-3.5" /> Reset Overrides ({Object.keys(overrides).length})
+              </button>
+            )}
           </div>
-          {Object.keys(overrides).length > 0 && (
+
+          {/* Bet Type Filter Pills + Won Only Toggle */}
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-1.5">
+              {LEDGER_BET_FILTERS.map((bf) => (
+                <button
+                  key={bf.key}
+                  type="button"
+                  onClick={() => setLedgerBetFilter(bf.key)}
+                  className={`rounded-lg px-2.5 py-1 text-[11px] font-semibold transition ${
+                    ledgerBetFilter === bf.key
+                      ? 'bg-emerald-500 text-slate-950'
+                      : 'border border-slate-800 bg-slate-950/70 text-slate-400 hover:border-slate-700 hover:text-slate-200'
+                  }`}
+                >
+                  {bf.label}
+                </button>
+              ))}
+            </div>
+
             <button
               type="button"
-              onClick={resetAllOverrides}
-              className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-700"
+              onClick={() => setWonOnly((v) => !v)}
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1 text-[11px] font-bold transition ${
+                wonOnly
+                  ? 'border-emerald-500 bg-emerald-500/20 text-emerald-300'
+                  : 'border-slate-700 bg-slate-950 text-slate-400 hover:text-slate-200'
+              }`}
             >
-              <RotateCcw className="h-3.5 w-3.5" /> Reset Overrides ({Object.keys(overrides).length})
+              <Trophy className="h-3.5 w-3.5" /> Won Only {wonOnly ? 'ON' : 'OFF'}
             </button>
-          )}
+          </div>
         </div>
 
         <div className="overflow-x-auto">
@@ -434,179 +536,223 @@ export function TabProfitability({ settlements, loading = false }: Props) {
               <tr>
                 <th className="px-3 py-2.5">Date / Race</th>
                 <th className="px-3 py-2.5">Conditions</th>
-                <th className="px-3 py-2.5">#1 Selection</th>
-                <th className="px-3 py-2.5 text-right">SP / BSP</th>
-                <th className="px-3 py-2.5 text-right">Win Override</th>
-                <th className="px-3 py-2.5 text-right">2-Leg SRM Override</th>
-                <th className="px-3 py-2.5 text-right">3-Leg SRM Override</th>
+                <th className="px-3 py-2.5">#1 Selection / Quaddie</th>
+                <th className="px-3 py-2.5">All Bet Outcomes (Click Row for Combos &amp; Overrides)</th>
+                <th className="px-3 py-2.5 text-right">Row Net</th>
+                <th className="px-3 py-2.5"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/70 tabular-nums">
-              {filtered.map((s) => {
-                const srm2 = s.srm?.find((x) => x.leg_count === 2);
-                const srm3 = s.srm?.find((x) => x.leg_count === 3);
-                return (
-                  <tr key={s.settlement_id} className="hover:bg-slate-800/40">
-                    <td className="px-3 py-2.5">
-                      <div className="font-semibold text-slate-100">
-                        {s.meeting_name} {s.kind === 'quaddie' ? 'Quaddie' : `R${s.race_number}`}
-                      </div>
-                      <div className="text-[11px] text-slate-400">
-                        {s.date} · {s.tier}
-                      </div>
-                    </td>
-                    <td className="px-3 py-2.5 text-[11px] text-slate-300">
-                      {s.track_condition} · {s.distance_band} · {s.fluc_direction}
-                    </td>
-                    <td className="px-3 py-2.5">
-                      {s.kind === 'quaddie' && s.quaddie ? (
-                        <div>
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="font-mono text-xs font-bold text-emerald-300">
-                              {s.quaddie.display}
-                            </span>
-                            <span
-                              className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
-                                s.quaddie.won
-                                  ? 'bg-emerald-500/20 text-emerald-300'
-                                  : 'bg-rose-500/15 text-rose-300'
-                              }`}
-                            >
-                              {s.quaddie.won ? 'W' : 'L'}
-                            </span>
-                            {s.quaddie.legs_won !== undefined && (
-                              <span className="text-[10px] text-slate-400">
-                                ({s.quaddie.legs_won}/4 legs)
-                              </span>
-                            )}
+              {ledgerRows.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="px-4 py-8 text-center text-xs text-slate-500">
+                    No settled bets match this bet type / Won Only filter.
+                  </td>
+                </tr>
+              ) : (
+                ledgerRows.map(({ settlement: s, allBets, matchingBets }) => {
+                  const isOpen = expandedRowId === s.settlement_id;
+                  // Row Net sums matching non-overlapping bets (exclude win_overlay if win_all is also in matchingBets)
+                  const hasWinAll = matchingBets.some((b) => b.betKey === 'win_all');
+                  const rowNet = matchingBets
+                    .filter((b) => !(hasWinAll && b.betKey === 'win_overlay'))
+                    .reduce((acc, b) => acc + b.profit, 0);
+
+                  return (
+                    <React.Fragment key={s.settlement_id}>
+                      <tr
+                        onClick={() => setExpandedRowId(isOpen ? null : s.settlement_id)}
+                        className={`cursor-pointer transition hover:bg-slate-800/45 ${
+                          isOpen ? 'bg-slate-800/35' : ''
+                        }`}
+                      >
+                        <td className="px-3 py-2.5">
+                          <div className="font-semibold text-slate-100">
+                            {s.meeting_name} {s.kind === 'quaddie' ? 'Quaddie' : `R${s.race_number}`}
                           </div>
-                          {s.quaddie.legs && s.quaddie.legs.length > 0 && (
-                            <div className="mt-0.5 text-[10px] text-slate-400">
-                              {s.quaddie.legs
-                                .map(
-                                  (l) =>
-                                    `R${l.race_number}: ${
-                                      l.runner_names?.length
-                                        ? l.runner_names.join(', ')
-                                        : l.runner_numbers.map((n) => `#${n}`).join(', ')
-                                    }`
-                                )
-                                .join(' · ')}
+                          <div className="text-[11px] text-slate-400">
+                            {s.date} · {s.tier}
+                          </div>
+                        </td>
+                        <td className="px-3 py-2.5 text-[11px] text-slate-300">
+                          {s.track_condition} · {s.distance_band} · {s.fluc_direction}
+                        </td>
+                        <td className="px-3 py-2.5">
+                          {s.kind === 'quaddie' && s.quaddie ? (
+                            <div>
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="font-mono text-xs font-bold text-emerald-300">
+                                  {s.quaddie.display}
+                                </span>
+                                <span
+                                  className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                                    s.quaddie.won
+                                      ? 'bg-emerald-500/20 text-emerald-300'
+                                      : 'bg-rose-500/15 text-rose-300'
+                                  }`}
+                                >
+                                  {s.quaddie.won ? 'W' : 'L'}
+                                </span>
+                                {s.quaddie.legs_won !== undefined && (
+                                  <span className="text-[10px] text-slate-400">
+                                    ({s.quaddie.legs_won}/4 legs)
+                                  </span>
+                                )}
+                              </div>
                             </div>
+                          ) : s.win_all ? (
+                            <div>
+                              <span className="font-semibold text-slate-100">
+                                #{s.win_all.runner_number} {s.win_all.runner_name}
+                              </span>{' '}
+                              <span
+                                className={`ml-1 rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                                  s.win_all.void || s.win_all.scratched
+                                    ? 'bg-amber-500/20 text-amber-300'
+                                    : s.win_all.won
+                                    ? 'bg-emerald-500/20 text-emerald-300'
+                                    : 'bg-slate-800 text-slate-400'
+                                }`}
+                              >
+                                {s.win_all.won
+                                  ? '1st · WON'
+                                  : formatOrdinal(s.win_all.finish_position, s.win_all.void, s.win_all.scratched)}
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="text-slate-500">—</span>
                           )}
-                        </div>
-                      ) : s.win_all ? (
-                        <div>
-                          <span className="font-semibold text-slate-100">
-                            #{s.win_all.runner_number} {s.win_all.runner_name}
-                          </span>{' '}
-                          <span
-                            className={`ml-1 rounded px-1.5 py-0.5 text-[10px] font-bold ${
-                              s.win_all.void || s.win_all.scratched
-                                ? 'bg-amber-500/20 text-amber-300'
-                                : s.win_all.won
-                                ? 'bg-emerald-500/20 text-emerald-300'
-                                : 'bg-slate-800 text-slate-400'
-                            }`}
-                          >
-                            {s.win_all.won
-                              ? '1st · WON'
-                              : formatOrdinal(s.win_all.finish_position, s.win_all.void, s.win_all.scratched)}
-                          </span>
-                        </div>
-                      ) : (
-                        <span className="text-slate-500">—</span>
-                      )}
-                    </td>
-                    <td className="px-3 py-2.5 text-right text-slate-300">
-                      {s.kind === 'quaddie' && s.quaddie ? (
-                        <div>
-                          <div>{s.quaddie.dividend ? `$${s.quaddie.dividend.toFixed(2)}` : '—'}</div>
-                          <div className="text-[10px] text-slate-400">{s.quaddie.flexi_pct.toFixed(1)}% flexi</div>
-                        </div>
-                      ) : s.win_all ? (
-                        <>
-                          ${s.win_all.settled_odds.toFixed(2)}
-                          {s.win_all?.betfair_bsp ? (
-                            <div className="text-[10px] text-amber-300">BSP ${s.win_all.betfair_bsp.toFixed(2)}</div>
-                          ) : null}
-                        </>
-                      ) : (
-                        '—'
-                      )}
-                    </td>
-                    <td className="px-3 py-2.5 text-right">
-                      {s.kind === 'quaddie' && s.quaddie ? (
-                        <input
-                          type="number"
-                          step="1"
-                          placeholder={s.quaddie.dividend ? s.quaddie.dividend.toFixed(2) : 'Div'}
-                          value={overrides[overrideKey(s.settlement_id, 'quaddie')] ?? ''}
-                          onChange={(e) => updateOverride(s.settlement_id, 'quaddie', e.target.value)}
-                          className="w-20 rounded border border-slate-700 bg-slate-950 px-2 py-1 text-right text-xs text-slate-100 focus:border-emerald-500 focus:outline-none"
-                        />
-                      ) : s.win_all && !s.win_all.void ? (
-                        <input
-                          type="number"
-                          step="0.05"
-                          placeholder={s.win_all.settled_odds.toFixed(2)}
-                          value={overrides[overrideKey(s.settlement_id, 'win_all')] ?? ''}
-                          onChange={(e) => updateOverride(s.settlement_id, 'win_all', e.target.value)}
-                          className="w-20 rounded border border-slate-700 bg-slate-950 px-2 py-1 text-right text-xs text-slate-100 focus:border-emerald-500 focus:outline-none"
-                        />
-                      ) : (
-                        <span className="text-[11px] text-amber-300/80">{s.win_all ? 'VOID' : '—'}</span>
-                      )}
-                    </td>
-                    <td className="px-3 py-2.5 text-right">
-                      {srm2 ? (
-                        srm2.void ? (
-                          <span className="text-[11px] text-amber-300/80">VOID</span>
-                        ) : (
-                          <div className="flex items-center justify-end gap-1.5">
-                            <span className={`text-[10px] font-bold ${srm2.won ? 'text-emerald-400' : 'text-slate-500'}`}>
-                              {srm2.won ? 'W' : 'L'}
-                            </span>
-                            <input
-                              type="number"
-                              step="0.05"
-                              placeholder={srm2.settled_odds.toFixed(2)}
-                              value={overrides[overrideKey(s.settlement_id, 'srm_2leg')] ?? ''}
-                              onChange={(e) => updateOverride(s.settlement_id, 'srm_2leg', e.target.value)}
-                              className="w-20 rounded border border-slate-700 bg-slate-950 px-2 py-1 text-right text-xs text-slate-100 focus:border-emerald-500 focus:outline-none"
-                            />
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <div className="flex flex-wrap gap-1.5">
+                            {matchingBets.map((b) => {
+                              const pillStyle =
+                                b.status === 'W'
+                                  ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-200'
+                                  : b.status === 'VOID'
+                                  ? 'border-amber-500/35 bg-amber-500/10 text-amber-300'
+                                  : 'border-slate-800 bg-slate-950/70 text-slate-400';
+                              return (
+                                <span
+                                  key={b.betKey}
+                                  className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold ${pillStyle}`}
+                                  title={`${b.label}: ${b.comboText}`}
+                                >
+                                  <span>{b.shortTag}</span>
+                                  <strong
+                                    className={
+                                      b.status === 'W'
+                                        ? 'text-emerald-300'
+                                        : b.status === 'VOID'
+                                        ? 'text-amber-300'
+                                        : 'text-slate-500'
+                                    }
+                                  >
+                                    {b.status}
+                                  </strong>
+                                  {b.status === 'W' && b.effectiveReturn > 0 && (
+                                    <span className="text-emerald-300">
+                                      ${b.effectiveReturn.toFixed(0)}
+                                    </span>
+                                  )}
+                                  {b.status !== 'W' && b.officialOdds && b.status !== 'VOID' && (
+                                    <span className="text-slate-500">
+                                      ${b.officialOdds.toFixed(1)}
+                                    </span>
+                                  )}
+                                  {b.hasOverride && (
+                                    <span className="h-1.5 w-1.5 rounded-full bg-sky-400" title="Manual override applied" />
+                                  )}
+                                </span>
+                              );
+                            })}
                           </div>
-                        )
-                      ) : (
-                        '—'
+                        </td>
+                        <td
+                          className={`px-3 py-2.5 text-right font-bold ${
+                            rowNet > 0 ? 'text-emerald-400' : rowNet < 0 ? 'text-rose-400' : 'text-slate-400'
+                          }`}
+                        >
+                          {rowNet >= 0 ? '+' : ''}${rowNet.toFixed(2)}
+                        </td>
+                        <td className="px-3 py-2.5 text-slate-400">
+                          {isOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                        </td>
+                      </tr>
+
+                      {isOpen && (
+                        <tr>
+                          <td colSpan={6} className="bg-slate-950/90 p-4">
+                            <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+                              <span className="font-bold text-slate-100">
+                                Full Bet Breakdown &amp; Actual-Dividend Overrides — {s.meeting_name}{' '}
+                                {s.kind === 'quaddie' ? 'Quaddie' : `R${s.race_number}`}
+                              </span>
+                              {s.top4_order && s.top4_order.length > 0 && (
+                                <span className="text-[11px] text-slate-400">
+                                  Official Top 4: <strong className="text-slate-200">{s.top4_order.join(' - ')}</strong>
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="grid gap-2.5 md:grid-cols-2 xl:grid-cols-3">
+                              {allBets.map((b) => (
+                                <div
+                                  key={b.betKey}
+                                  className="rounded-xl border border-slate-800 bg-slate-900/75 p-3 text-xs"
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="font-bold text-slate-100">{b.label}</span>
+                                    <span
+                                      className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                                        b.status === 'W'
+                                          ? 'bg-emerald-500/20 text-emerald-300'
+                                          : b.status === 'VOID'
+                                          ? 'bg-amber-500/20 text-amber-300'
+                                          : 'bg-slate-800 text-slate-400'
+                                      }`}
+                                    >
+                                      {b.status === 'W' ? 'WON' : b.status === 'VOID' ? 'VOID ($0)' : 'LOST'}
+                                    </span>
+                                  </div>
+                                  <div className="mt-1 font-mono text-[11px] text-slate-200">{b.comboText}</div>
+                                  {b.subText && <div className="mt-0.5 text-[10px] text-slate-400">{b.subText}</div>}
+
+                                  <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-slate-800 pt-2">
+                                    <div className="text-[11px] text-slate-300">
+                                      Stake ${b.stake.toFixed(0)} → Return{' '}
+                                      <strong className="text-white">${b.effectiveReturn.toFixed(2)}</strong>{' '}
+                                      <span className={b.profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                                        ({b.profit >= 0 ? '+' : ''}${b.profit.toFixed(2)})
+                                      </span>
+                                    </div>
+                                    {b.status !== 'VOID' && b.betKey !== 'win_overlay' && (
+                                      <div className="flex items-center gap-1">
+                                        <span className="text-[10px] text-slate-500">
+                                          {b.isFlexi ? 'Div $' : 'Odds $'}
+                                        </span>
+                                        <input
+                                          type="number"
+                                          step={b.isFlexi ? '0.5' : '0.05'}
+                                          placeholder={b.officialOdds ? b.officialOdds.toFixed(2) : 'Override'}
+                                          value={overrides[b.overrideKey] ?? ''}
+                                          onClick={(e) => e.stopPropagation()}
+                                          onChange={(e) => updateOverrideByKey(b.overrideKey, e.target.value)}
+                                          className="w-20 rounded border border-slate-700 bg-slate-950 px-2 py-0.5 text-right text-[11px] text-slate-100 focus:border-emerald-500 focus:outline-none"
+                                        />
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </td>
+                        </tr>
                       )}
-                    </td>
-                    <td className="px-3 py-2.5 text-right">
-                      {srm3 ? (
-                        srm3.void ? (
-                          <span className="text-[11px] text-amber-300/80">VOID</span>
-                        ) : (
-                          <div className="flex items-center justify-end gap-1.5">
-                            <span className={`text-[10px] font-bold ${srm3.won ? 'text-emerald-400' : 'text-slate-500'}`}>
-                              {srm3.won ? 'W' : 'L'}
-                            </span>
-                            <input
-                              type="number"
-                              step="0.05"
-                              placeholder={srm3.settled_odds.toFixed(2)}
-                              value={overrides[overrideKey(s.settlement_id, 'srm_3leg')] ?? ''}
-                              onChange={(e) => updateOverride(s.settlement_id, 'srm_3leg', e.target.value)}
-                              className="w-20 rounded border border-slate-700 bg-slate-950 px-2 py-1 text-right text-xs text-slate-100 focus:border-emerald-500 focus:outline-none"
-                            />
-                          </div>
-                        )
-                      ) : (
-                        '—'
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
+                    </React.Fragment>
+                  );
+                })
+              )}
             </tbody>
           </table>
         </div>

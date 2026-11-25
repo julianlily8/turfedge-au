@@ -1,8 +1,29 @@
-import type { ScoredRunner } from '../lib/types';
-import { CheckCircle2, MinusCircle } from 'lucide-react';
+import type { AuditFactor, ScoredRunner } from '../lib/types';
+import { FACTOR_DEFINITIONS, NEUTRAL_SCORE, NO_DATA_LABEL } from '../lib/localScorer23pt';
 
 export function RunnerAuditDrawer({ runner }: { runner: ScoredRunner }) {
-  const categories = Array.from(new Set(runner.audit_23pt.map((f) => f.category)));
+  // Always surface all 23 factors cleanly, never omitting flat/neutral factors
+  const existingMap = new Map<string, AuditFactor>();
+  (runner.audit_23pt || []).forEach((f) => existingMap.set(f.key, f));
+
+  const all23: AuditFactor[] = FACTOR_DEFINITIONS.map((def) => {
+    const found = existingMap.get(def.key);
+    if (found) return found;
+    return {
+      key: def.key,
+      label: def.label,
+      category: def.category,
+      weight: def.weight,
+      score: NEUTRAL_SCORE,
+      weighted_points: Math.round(((NEUTRAL_SCORE / 10) * def.weight) * 1000) / 1000,
+      has_data: false,
+      reason: NO_DATA_LABEL,
+    };
+  });
+
+  const categories = Array.from(new Set(all23.map((f) => f.category)));
+  const liveCount = all23.filter((f) => f.has_data).length;
+  const neutralCount = all23.length - liveCount;
 
   return (
     <div className="border-t border-slate-800 bg-slate-950/90 p-4">
@@ -12,16 +33,17 @@ export function RunnerAuditDrawer({ runner }: { runner: ScoredRunner }) {
             23-Point Audit Breakdown — #{runner.runner_number} {runner.name}
           </h4>
           <p className="text-xs text-slate-400">
-            Composite {runner.composite_score.toFixed(1)}/100 · Rated ${runner.rated_price.toFixed(2)} vs Live ${runner.live_win > 0 ? runner.live_win.toFixed(2) : '—'}
+            Composite {runner.composite_score.toFixed(1)}/100 · Rated ${runner.rated_price.toFixed(2)} vs Live $
+            {runner.live_win > 0 ? runner.live_win.toFixed(2) : '—'}
             {runner.ai_note ? ` · ${runner.ai_note}` : ''}
           </p>
         </div>
-        <div className="flex items-center gap-3 text-[11px] text-slate-400">
-          <span className="inline-flex items-center gap-1">
-            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" /> Verified Signal
+        <div className="flex items-center gap-2 text-[10px] font-bold">
+          <span className="rounded-full border border-emerald-500/35 bg-emerald-500/15 px-2.5 py-0.5 text-emerald-300">
+            {liveCount} LIVE
           </span>
-          <span className="inline-flex items-center gap-1">
-            <MinusCircle className="h-3.5 w-3.5 text-slate-500" /> Neutral 5.0 (No data available)
+          <span className="rounded-full border border-slate-700 bg-slate-800/80 px-2.5 py-0.5 text-slate-400">
+            {neutralCount} NEUTRAL 5.0
           </span>
         </div>
       </div>
@@ -33,7 +55,7 @@ export function RunnerAuditDrawer({ runner }: { runner: ScoredRunner }) {
               {cat}
             </div>
             <div className="space-y-2.5">
-              {runner.audit_23pt
+              {all23
                 .filter((f) => f.category === cat)
                 .map((f) => {
                   const pct = Math.min(100, Math.max(0, (f.score / 10) * 100));
@@ -49,9 +71,24 @@ export function RunnerAuditDrawer({ runner }: { runner: ScoredRunner }) {
                   return (
                     <div key={f.key} className="text-xs">
                       <div className="flex items-center justify-between gap-2">
-                        <span className="font-medium text-slate-200">{f.label}</span>
+                        <div className="flex min-w-0 items-center gap-1.5">
+                          <span className="truncate font-medium text-slate-200">{f.label}</span>
+                          {f.has_data ? (
+                            <span className="shrink-0 rounded bg-emerald-500/15 px-1.5 py-0.2 text-[9px] font-bold uppercase tracking-wide text-emerald-300 ring-1 ring-emerald-500/30">
+                              LIVE
+                            </span>
+                          ) : (
+                            <span className="shrink-0 rounded bg-slate-800 px-1.5 py-0.2 text-[9px] font-bold uppercase tracking-wide text-slate-400 ring-1 ring-slate-700">
+                              NEUTRAL 5.0
+                            </span>
+                          )}
+                        </div>
                         <span className="shrink-0 tabular-nums text-[11px] text-slate-300">
-                          <strong className={!f.has_data ? 'text-slate-400' : f.score >= 7 ? 'text-emerald-400' : 'text-slate-100'}>
+                          <strong
+                            className={
+                              !f.has_data ? 'text-slate-400' : f.score >= 7 ? 'text-emerald-400' : 'text-slate-100'
+                            }
+                          >
                             {f.score.toFixed(1)}
                           </strong>
                           /10 <span className="text-slate-500">({f.weight}% · +{f.weighted_points.toFixed(2)})</span>

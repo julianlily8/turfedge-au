@@ -22,19 +22,47 @@ SYDNEY_TZ = ZoneInfo("Australia/Sydney")
 
 
 def should_run_morning_window(force: bool = False) -> bool:
-    """Guard for dual UTC crons (21:27 & 22:27 UTC) so ingestion runs once daily at 08:xx Sydney local time."""
+    """Allow both primary (8:27 AM AEDT) and backup (9:17 AM AEDT / 8:17 AM AEST) morning cron runs."""
     if force:
         return True
     now_syd = datetime.now(SYDNEY_TZ)
-    return now_syd.hour == 8
+    return now_syd.hour in (8, 9)
 
 
-def run_morning_ingest(date_str: str, dry_run: bool = False, max_meetings: int = 0) -> None:
-    http = PoliteHttpClient(min_delay_seconds=3.0)
+def _already_ingested_and_analyzed(store: FirestoreStore, date_str: str, require_gemini: bool) -> bool:
+    """Return True if today's meetings and races are already in Firestore with baseline Gemini analysis."""
+    existing_meetings = store.query_by_field("meetings", "date", date_str)
+    if not existing_meetings:
+        return False
+    existing_races = store.query_by_field("races", "date", date_str)
+    if not existing_races:
+        return False
+    all_baseline = all(bool(r.get("baseline_analyzed")) for r in existing_races)
+    if not all_baseline:
+        return False
+    if require_gemini:
+        any_gemini = any(bool(r.get("ai_model")) for r in existing_races)
+        if not any_gemini:
+            return False
+    logger.info(
+        "Idempotency check: %s already has %d meeting(s) & %d Gemini-analyzed race(s) in Firestore. Skipping duplicate run.",
+        date_str,
+        len(existing_meetings),
+        len(existing_races),
+    )
+    return True
+
+
+def run_morning_ingest(date_str: str, dry_run: bool = False, max_meetings: int = 0, force: bool = False) -> None:
     store = FirestoreStore(dry_run=dry_run)
+    gemini = GeminiBatchAnalyzer()
+
+    if not force and not dry_run and _already_ingested_and_analyzed(store, date_str, require_gemini=gemini.is_configured):
+        return
+
+    http = PoliteHttpClient(min_delay_seconds=3.0)
     ladbrokes = LadbrokesSource(http)
     weather_src = WeatherSource(http)
-    gemini = GeminiBatchAnalyzer()
     yt_fs_config = store.get_doc("config", "youtube_previews")
 
     meetings = ladbrokes.fetch_aus_meetings(date_str, include_country=False)
@@ -207,11 +235,11 @@ def main() -> None:
 
     force = args.force or os.environ.get("FORCE_RUN", "").lower() == "true" or args.dry_run
     if not should_run_morning_window(force=force):
-        logger.info("Skipping run: current Australia/Sydney hour is %d (not 08:xx).", datetime.now(SYDNEY_TZ).hour)
+        logger.info("Skipping run: current Australia/Sydney hour is %d (outside 08:xx–09:xx morning window).", datetime.now(SYDNEY_TZ).hour)
         return
 
     date_str = args.date or datetime.now(SYDNEY_TZ).strftime("%Y-%m-%d")
-    run_morning_ingest(date_str=date_str, dry_run=args.dry_run, max_meetings=args.max_meetings)
+    run_morning_ingest(date_str=date_str, dry_run=args.dry_run, max_meetings=args.max_meetings, force=force)
 
 
 if __name__ == "__main__":

@@ -72,11 +72,188 @@ export interface FactorDiagnostic {
   label: string;
   category: string;
   sampleCount: number;
+  hasLiveData: boolean;
   avgWinScore: number;
   avgLossScore: number;
   edgeDelta: number;
   highScorePotPct: number | null;
   recommendation: 'Boost Weight' | 'Keep' | 'Trim Weight' | 'Low Sample';
+}
+
+export interface LedgerBetDetail {
+  betKey: string;
+  shortTag: string;
+  label: string;
+  status: 'W' | 'L' | 'VOID';
+  stake: number;
+  officialOdds: number | null;
+  effectiveReturn: number;
+  profit: number;
+  isFlexi: boolean;
+  flexiPct?: number;
+  overrideKey: string;
+  hasOverride: boolean;
+  comboText: string;
+  subText?: string;
+}
+
+export function getLedgerBetDetails(
+  s: SettlementDoc,
+  overrides: OddsOverrideMap
+): LedgerBetDetail[] {
+  const items: LedgerBetDetail[] = [];
+
+  if (s.win_all) {
+    const isVoid = Boolean(
+      s.win_all.void ||
+        s.win_all.scratched ||
+        s.win_all.stake <= 0 ||
+        s.win_all.finish_position === null ||
+        s.win_all.finish_position === undefined
+    );
+    const oKey = overrideKey(s.settlement_id, 'win_all');
+    const ov = overrides[oKey];
+    const ret = isVoid ? 0 : effectiveReturn(s.win_all.won, s.win_all.stake, s.win_all.return, ov);
+    const stake = isVoid ? 0 : s.win_all.stake;
+    items.push({
+      betKey: 'win_all',
+      shortTag: 'Win',
+      label: 'Win (All)',
+      status: isVoid ? 'VOID' : s.win_all.won ? 'W' : 'L',
+      stake,
+      officialOdds: s.win_all.settled_odds > 0 ? s.win_all.settled_odds : null,
+      effectiveReturn: ret,
+      profit: Math.round((ret - stake) * 100) / 100,
+      isFlexi: false,
+      overrideKey: oKey,
+      hasOverride: ov !== undefined,
+      comboText: `#${s.win_all.runner_number} ${s.win_all.runner_name} (${
+        s.win_all.won
+          ? '1st'
+          : formatOrdinal(s.win_all.finish_position, isVoid, s.win_all.scratched)
+      })`,
+      subText: s.win_all.betfair_bsp
+        ? `Rated $${s.win_all.rated_price?.toFixed(2) ?? '—'} · SP $${s.win_all.settled_odds.toFixed(2)} · BSP $${s.win_all.betfair_bsp.toFixed(2)}`
+        : `Rated $${s.win_all.rated_price?.toFixed(2) ?? '—'} · SP $${s.win_all.settled_odds.toFixed(2)}`,
+    });
+  }
+
+  if (s.win_overlay) {
+    const isVoid = Boolean(
+      s.win_overlay.void ||
+        s.win_overlay.scratched ||
+        s.win_overlay.stake <= 0 ||
+        s.win_overlay.finish_position === null ||
+        s.win_overlay.finish_position === undefined
+    );
+    const oKey = overrideKey(s.settlement_id, 'win_all');
+    const ov = overrides[oKey];
+    const ret = isVoid ? 0 : effectiveReturn(s.win_overlay.won, s.win_overlay.stake, s.win_overlay.return, ov);
+    const stake = isVoid ? 0 : s.win_overlay.stake;
+    items.push({
+      betKey: 'win_overlay',
+      shortTag: 'Overlay',
+      label: 'Win (Value Overlay)',
+      status: isVoid ? 'VOID' : s.win_overlay.won ? 'W' : 'L',
+      stake,
+      officialOdds: s.win_overlay.settled_odds > 0 ? s.win_overlay.settled_odds : null,
+      effectiveReturn: ret,
+      profit: Math.round((ret - stake) * 100) / 100,
+      isFlexi: false,
+      overrideKey: oKey,
+      hasOverride: ov !== undefined,
+      comboText: `#${s.win_overlay.runner_number} ${s.win_overlay.runner_name} (Value Overlay)`,
+      subText: `Live $${s.win_overlay.live_price?.toFixed(2) ?? '—'} > Rated $${s.win_overlay.rated_price?.toFixed(2) ?? '—'}`,
+    });
+  }
+
+  (s.srm || []).forEach((srm) => {
+    const betKey = `srm_${srm.leg_count}leg`;
+    const isVoid = Boolean(srm.void || srm.stake <= 0);
+    const oKey = overrideKey(s.settlement_id, betKey);
+    const ov = overrides[oKey];
+    const ret = isVoid ? 0 : effectiveReturn(srm.won, srm.stake, srm.return, ov);
+    const stake = isVoid ? 0 : srm.stake;
+    items.push({
+      betKey,
+      shortTag: `${srm.leg_count}L`,
+      label: `${srm.leg_count}-Leg SRM`,
+      status: isVoid ? 'VOID' : srm.won ? 'W' : 'L',
+      stake,
+      officialOdds: srm.settled_odds > 0 ? srm.settled_odds : null,
+      effectiveReturn: ret,
+      profit: Math.round((ret - stake) * 100) / 100,
+      isFlexi: false,
+      overrideKey: oKey,
+      hasOverride: ov !== undefined,
+      comboText: (srm.legs || []).map((l) => `#${l.runner_number} ${l.name} (${l.market})`).join(' + '),
+      subText: `0.75x est. $${srm.settled_odds.toFixed(2)} (raw Harville $${srm.raw_harville_odds.toFixed(2)})`,
+    });
+  });
+
+  const exoticSpecs: { key: 'exacta' | 'trifecta' | 'first4'; shortTag: string; label: string }[] = [
+    { key: 'exacta', shortTag: 'Ex', label: 'Exacta' },
+    { key: 'trifecta', shortTag: 'Tri', label: 'Trifecta' },
+    { key: 'first4', shortTag: 'F4', label: 'First 4' },
+  ];
+
+  exoticSpecs.forEach(({ key, shortTag, label }) => {
+    const bet = s[key];
+    if (!bet) return;
+    const isVoid = Boolean(bet.void || bet.stake <= 0);
+    const oKey = overrideKey(s.settlement_id, key);
+    const ov = overrides[oKey];
+    const ret = isVoid ? 0 : effectiveReturn(bet.won, bet.stake, bet.return, ov, bet.flexi_pct);
+    const stake = isVoid ? 0 : bet.stake;
+    items.push({
+      betKey: key,
+      shortTag,
+      label: `${label} ($10 Flexi)`,
+      status: isVoid ? 'VOID' : bet.won ? 'W' : 'L',
+      stake,
+      officialOdds: bet.dividend && bet.dividend > 0 ? bet.dividend : null,
+      effectiveReturn: ret,
+      profit: Math.round((ret - stake) * 100) / 100,
+      isFlexi: true,
+      flexiPct: bet.flexi_pct,
+      overrideKey: oKey,
+      hasOverride: ov !== undefined,
+      comboText: bet.display,
+      subText: `${bet.combinations} combos · ${bet.flexi_pct.toFixed(1)}% flexi${
+        bet.dividend ? ` · Official Div $${bet.dividend.toFixed(2)}` : ''
+      }`,
+    });
+  });
+
+  if (s.quaddie) {
+    const isVoid = Boolean(s.quaddie.void || s.quaddie.stake <= 0);
+    const oKey = overrideKey(s.settlement_id, 'quaddie');
+    const ov = overrides[oKey];
+    const ret = isVoid
+      ? 0
+      : effectiveReturn(s.quaddie.won, s.quaddie.stake, s.quaddie.return, ov, s.quaddie.flexi_pct);
+    const stake = isVoid ? 0 : s.quaddie.stake;
+    items.push({
+      betKey: 'quaddie',
+      shortTag: 'Quad',
+      label: 'Quaddie ($10 Flexi)',
+      status: isVoid ? 'VOID' : s.quaddie.won ? 'W' : 'L',
+      stake,
+      officialOdds: s.quaddie.dividend && s.quaddie.dividend > 0 ? s.quaddie.dividend : null,
+      effectiveReturn: ret,
+      profit: Math.round((ret - stake) * 100) / 100,
+      isFlexi: true,
+      flexiPct: s.quaddie.flexi_pct,
+      overrideKey: oKey,
+      hasOverride: ov !== undefined,
+      comboText: s.quaddie.display,
+      subText: `${s.quaddie.legs_won ?? 0}/4 legs · ${s.quaddie.combinations} combos · ${s.quaddie.flexi_pct.toFixed(
+        1
+      )}% flexi${s.quaddie.dividend ? ` · Official Div $${s.quaddie.dividend.toFixed(2)}` : ''}`,
+    });
+  }
+
+  return items;
 }
 
 const OVERRIDES_STORAGE_KEY = 'turfedge_actual_odds_overrides_v1';
@@ -303,17 +480,32 @@ export function computeProfitability(
 
   // Strict delta threshold + 100-win minimum sample-size guard:
   // Force 'Low Sample' whenever total settled wins < 100 so small-sample noise never shows Boost/Keep/Trim.
+  // Always return ALL 23 factors with an explicit hasLiveData flag (never silently dropping neutral 5.0 factors).
   const factorDiagnostics: FactorDiagnostic[] = FACTOR_DEFINITIONS.map((f) => {
     const st = factorStats[f.key];
     const sampleCount = st.winScores.length + st.lossScores.length;
-    const avgWin = st.winScores.length ? st.winScores.reduce((a, b) => a + b, 0) / st.winScores.length : 0;
-    const avgLoss = st.lossScores.length ? st.lossScores.reduce((a, b) => a + b, 0) / st.lossScores.length : 0;
-    const edgeDelta = Math.round((avgWin - avgLoss) * 100) / 100;
+    const hasLiveData = sampleCount > 0;
+    const avgWin = st.winScores.length
+      ? st.winScores.reduce((a, b) => a + b, 0) / st.winScores.length
+      : hasLiveData
+      ? 0
+      : 5.0;
+    const avgLoss = st.lossScores.length
+      ? st.lossScores.reduce((a, b) => a + b, 0) / st.lossScores.length
+      : hasLiveData
+      ? 0
+      : 5.0;
+    const edgeDelta = hasLiveData ? Math.round((avgWin - avgLoss) * 100) / 100 : 0;
     const highScorePotPct =
       st.highStaked > 0 ? Math.round(((st.highRet - st.highStaked) / st.highStaked) * 1000) / 10 : null;
 
     let recommendation: FactorDiagnostic['recommendation'] = 'Low Sample';
-    if (totalWinCount < MIN_SAMPLE_WINS_FOR_TUNING || st.winScores.length === 0 || st.lossScores.length === 0) {
+    if (
+      !hasLiveData ||
+      totalWinCount < MIN_SAMPLE_WINS_FOR_TUNING ||
+      st.winScores.length === 0 ||
+      st.lossScores.length === 0
+    ) {
       recommendation = 'Low Sample';
     } else if (edgeDelta >= 0.5) {
       recommendation = 'Boost Weight';
@@ -328,13 +520,14 @@ export function computeProfitability(
       label: f.label,
       category: f.category,
       sampleCount,
+      hasLiveData,
       avgWinScore: Math.round(avgWin * 100) / 100,
       avgLossScore: Math.round(avgLoss * 100) / 100,
       edgeDelta,
       highScorePotPct,
       recommendation,
     };
-  }).sort((a, b) => b.edgeDelta - a.edgeDelta);
+  }).sort((a, b) => Number(b.hasLiveData) - Number(a.hasLiveData) || b.edgeDelta - a.edgeDelta);
 
   return { categories, overall, cumulative, factorDiagnostics, totalWinCount };
 }

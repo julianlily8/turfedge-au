@@ -3,10 +3,10 @@ name: Morning Race Ingestion (8:30 AM AEDT/AEST)
 on:
   schedule:
     # Off-peak minutes to avoid top-of-hour GitHub Actions queue congestion.
-    # 21:27 UTC = 8:27 AM AEDT (UTC+11); 22:27 UTC = 8:27 AM AEST (UTC+10).
-    # Python script enforces Australia/Sydney 08:xx local-hour guard so it runs once daily.
+    # 21:27 UTC = 8:27 AM AEDT (primary); 22:17 UTC = 9:17 AM AEDT backup (also 8:17 AM AEST).
+    # Python script checks Firestore first and exits in seconds if today is already ingested & analyzed.
     - cron: '27 21 * * *'
-    - cron: '27 22 * * *'
+    - cron: '17 22 * * *'
   workflow_dispatch:
     inputs:
       date:

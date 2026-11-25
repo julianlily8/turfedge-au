@@ -246,6 +246,9 @@ export function TabUpcoming({
           {meetingRaces.map((r) => {
             const isSelected = activeRace?.race_id === r.race_id;
             const hasOverlay = r.win_selection?.is_value_overlay;
+            const isFinished = ['final', 'settled', 'closed', 'paying'].includes((r.status || '').toLowerCase());
+            const isTracked = Boolean(r.pre_jump_analyzed || r.baseline_analyzed);
+            const isFinalNoPick = !r.settled && isFinished && !isTracked;
             return (
               <button
                 key={r.race_id}
@@ -254,6 +257,13 @@ export function TabUpcoming({
                   setSelectedRaceId(r.race_id);
                   setExpandedRunner(null);
                 }}
+                title={
+                  isFinalNoPick
+                    ? 'This race finished without a pre-jump TurfEdge selection and is excluded from Tab 2 POT%.'
+                    : r.settled
+                    ? 'Settled and included in Tab 2 POT% profitability tracking.'
+                    : undefined
+                }
                 className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-xs transition ${
                   isSelected
                     ? 'border-emerald-500 bg-emerald-500/15 text-emerald-200'
@@ -262,16 +272,24 @@ export function TabUpcoming({
               >
                 <span className="font-bold">R{r.race_number}</span>
                 <span className="text-slate-400">{r.distance}m</span>
-                {hasOverlay && (
+                {hasOverlay && !isFinalNoPick && (
                   <span className="rounded bg-emerald-500/25 px-1.5 py-0.5 text-[10px] font-bold text-emerald-300">
                     VALUE
                   </span>
                 )}
-                {(r.settled || ['final', 'settled', 'closed'].includes((r.status || '').toLowerCase())) && (
-                  <span className="rounded bg-slate-700 px-1.5 py-0.5 text-[10px] uppercase text-slate-300">
-                    {r.settled ? 'SETTLED' : r.status}
+                {r.settled ? (
+                  <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-emerald-300">
+                    SETTLED
                   </span>
-                )}
+                ) : isFinalNoPick ? (
+                  <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-amber-300 ring-1 ring-amber-500/30">
+                    FINAL · NO PICK
+                  </span>
+                ) : isFinished ? (
+                  <span className="rounded bg-slate-700 px-1.5 py-0.5 text-[10px] uppercase text-slate-300">
+                    {r.status}
+                  </span>
+                ) : null}
               </button>
             );
           })}
@@ -299,11 +317,22 @@ export function TabUpcoming({
                     <span className="text-xs font-semibold text-slate-400">
                       {activeRace.meeting_name} ({activeRace.state}) · Race {activeRace.race_number}
                     </span>
-                    {activeRace.pre_jump_analyzed && (
+                    {activeRace.pre_jump_analyzed ? (
                       <span className="inline-flex items-center gap-1 rounded-full bg-sky-500/15 px-2 py-0.5 text-[10px] font-semibold text-sky-300">
                         <Sparkles className="h-3 w-3" /> {activeRace.ai_model || 'Pre-Jump Analyzed'}
                       </span>
-                    )}
+                    ) : activeRace.baseline_analyzed ? (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-indigo-500/15 px-2 py-0.5 text-[10px] font-semibold text-indigo-300">
+                        <Sparkles className="h-3 w-3" /> Morning Gemini Baseline
+                      </span>
+                    ) : ['final', 'closed', 'paying'].includes((activeRace.status || '').toLowerCase()) && !activeRace.settled ? (
+                      <span
+                        title="This race finished without a pre-jump TurfEdge selection and is excluded from Tab 2 POT%."
+                        className="inline-flex items-center gap-1 rounded-full border border-amber-500/35 bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-300"
+                      >
+                        FINAL · NO PICK (Excluded from POT%)
+                      </span>
+                    ) : null}
                   </div>
                   <h2 className="mt-1 text-lg font-bold text-white">{activeRace.name}</h2>
                 </div>

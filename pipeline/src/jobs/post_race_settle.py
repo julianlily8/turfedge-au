@@ -81,6 +81,7 @@ def run_settlement_for_date(date_str: str, store: FirestoreStore, http: PoliteHt
     by_meeting: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     settled_updates = 0
     cleaned_baseline = 0
+    backfilled_results = 0
 
     for race in races:
         slug = race.get("meeting_slug") or "unknown"
@@ -100,6 +101,31 @@ def run_settlement_for_date(date_str: str, store: FirestoreStore, http: PoliteHt
                     merge=True,
                 )
                 cleaned_baseline += 1
+
+            # Backfill Official Result Top 4 strip & Final status on Tab 1 for historical
+            # non-analyzed races WITHOUT creating a Tab 2 POT% settlement record.
+            has_results = bool(race.get("results"))
+            if (not has_results or status_lower not in ("final", "closed", "abandoned")) and _race_has_jumped(
+                race.get("advertised_start") or "", now_utc
+            ):
+                try:
+                    ev = ladbrokes.fetch_race_event(race["race_id"])
+                    ev_results = ev.get("results") or []
+                    ev_status = (ev.get("status") or "").strip()
+                    if ev_results or ev_status.lower() in ("final", "closed", "abandoned"):
+                        update_hist = {
+                            "status": "Final" if ev_results else (ev_status or "Final"),
+                            "results": ev_results,
+                            "dividends": ev.get("dividends") or {},
+                            "settled": False,
+                            "updated_at": now_utc.isoformat(),
+                        }
+                        store.set_doc("races", race["race_id"], update_hist, merge=True)
+                        race = {**race, **update_hist}
+                        backfilled_results += 1
+                except Exception as exc:
+                    logger.warning("Could not backfill historical results for %s: %s", race["race_id"], exc)
+
             by_meeting[slug].append(race)
             continue
 
@@ -199,9 +225,10 @@ def run_settlement_for_date(date_str: str, store: FirestoreStore, http: PoliteHt
         store.set_doc("meetings", meeting_doc_id, update_m, merge=True)
 
     logger.info(
-        "Post-race settlement finished for %s (%d race(s) settled/enriched, %d non-analyzed baseline settlement(s) cleaned).",
+        "Post-race settlement finished for %s (%d race(s) settled/enriched, %d historical result(s) backfilled, %d non-analyzed baseline settlement(s) cleaned).",
         date_str,
         settled_updates,
+        backfilled_results,
         cleaned_baseline,
     )
 
