@@ -329,26 +329,31 @@ class LadbrokesSource:
         for d in dividends_raw:
             if not isinstance(d, dict):
                 continue
-            pname = (d.get("product_name") or "").lower()
+            pname_raw = (d.get("product_name") or d.get("type") or "").strip().lower()
+            pname_norm = re.sub(r"[^a-z0-9]+", "_", pname_raw).strip("_")
             val = _safe_float(d.get("dividend"), 0.0)
             if val <= 0:
                 continue
             positions = d.get("positions") or []
-            if "win" in pname and positions:
+            if "win" in pname_raw and "double" not in pname_raw and positions:
                 rn = int(positions[0].get("runner_number") or 0)
                 if rn:
                     win_divs.setdefault(rn, []).append(val)
-            elif "place" in pname and positions:
+            elif "place" in pname_raw and positions:
                 rn = int(positions[0].get("runner_number") or 0)
                 if rn:
                     place_divs.setdefault(rn, []).append(val)
-            elif "exacta" in pname:
+            elif "exacta" in pname_norm:
                 exotics["exacta"].append(val)
-            elif "trifecta" in pname:
+            elif "trifecta" in pname_norm:
                 exotics["trifecta"].append(val)
-            elif "first" in pname and "4" in pname:
+            elif (
+                pname_norm in ("first_4", "first4", "first_four", "firstfour", "superfecta")
+                or ("first" in pname_raw and ("4" in pname_raw or "four" in pname_raw))
+                or "superfecta" in pname_raw
+            ):
                 exotics["first4"].append(val)
-            elif "quaddie" in pname or "quadrella" in pname:
+            elif "quaddie" in pname_norm or "quadrella" in pname_norm:
                 exotics["quaddie"].append(val)
 
         return {

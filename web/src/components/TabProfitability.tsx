@@ -9,11 +9,14 @@ import {
   CartesianGrid,
   Legend,
 } from 'recharts';
-import { SlidersHorizontal, TrendingUp, DollarSign, Target, Edit3, RotateCcw } from 'lucide-react';
+import { SlidersHorizontal, TrendingUp, DollarSign, Target, Edit3, RotateCcw, AlertTriangle } from 'lucide-react';
 import type { SettlementDoc } from '../lib/types';
 import {
+  COMBINED_CATEGORY_OPTIONS,
+  MIN_SAMPLE_WINS_FOR_TUNING,
   computeProfitability,
   filterSettlements,
+  formatOrdinal,
   loadOddsOverrides,
   overrideKey,
   saveOddsOverrides,
@@ -33,9 +36,20 @@ export function TabProfitability({ settlements }: Props) {
     tier: 'All',
   });
   const [overrides, setOverrides] = useState<OddsOverrideMap>(() => loadOddsOverrides());
+  // Default Combined KPI rollup to Win (All) only so simultaneous bet types don't distort single-unit P/L
+  const [selectedCombinedKeys, setSelectedCombinedKeys] = useState<string[]>(['win_all']);
+
+  const toggleCombinedKey = (key: string) => {
+    setSelectedCombinedKeys((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
+    );
+  };
 
   const filtered = useMemo(() => filterSettlements(settlements, filters), [settlements, filters]);
-  const stats = useMemo(() => computeProfitability(filtered, overrides), [filtered, overrides]);
+  const stats = useMemo(
+    () => computeProfitability(filtered, overrides, selectedCombinedKeys),
+    [filtered, overrides, selectedCombinedKeys]
+  );
 
   const updateOverride = (settlementId: string, betKey: string, val: string) => {
     const key = overrideKey(settlementId, betKey);
@@ -127,6 +141,38 @@ export function TabProfitability({ settlements }: Props) {
         </div>
       </div>
 
+      {/* Combined KPI Rollup Selector Checkboxes */}
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/70 px-4 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+            Combined KPI Rollup Categories (defaults to Win All)
+          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            {COMBINED_CATEGORY_OPTIONS.map((opt) => {
+              const checked = selectedCombinedKeys.includes(opt.key);
+              return (
+                <label
+                  key={opt.key}
+                  className={`inline-flex cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs transition ${
+                    checked
+                      ? 'border-emerald-500/50 bg-emerald-500/15 text-emerald-200'
+                      : 'border-slate-800 bg-slate-950/70 text-slate-400 hover:border-slate-700 hover:text-slate-200'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggleCombinedKey(opt.key)}
+                    className="h-3.5 w-3.5 rounded border-slate-600 bg-slate-900 accent-emerald-500"
+                  />
+                  <span>{opt.shortLabel}</span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
       {/* Top KPI Cards */}
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
@@ -142,7 +188,7 @@ export function TabProfitability({ settlements }: Props) {
             {stats.overall.netProfit >= 0 ? '+' : ''}${stats.overall.netProfit.toFixed(2)}
           </div>
           <div className="mt-1 text-xs text-slate-400 tabular-nums">
-            Staked ${stats.overall.totalStaked.toFixed(0)} · Return ${stats.overall.totalReturn.toFixed(2)}
+            Staked ${stats.overall.totalStaked.toFixed(0)} · Return ${stats.overall.totalReturn.toFixed(2)} ({selectedCombinedKeys.length} selected)
           </div>
         </div>
 
@@ -293,9 +339,16 @@ export function TabProfitability({ settlements }: Props) {
 
         {/* 23-Factor Weight Tuning Diagnostics */}
         <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 lg:col-span-5">
-          <h3 className="text-sm font-bold text-white">Factor Attribution (Weight Tuning)</h3>
-          <p className="mb-2.5 text-[11px] text-slate-400">
-            Compares average factor score on winning vs. losing #1 selections to guide edits in <code>factor_weights.json</code>.
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-sm font-bold text-white">Factor Attribution (Weight Tuning)</h3>
+            {stats.totalWinCount < MIN_SAMPLE_WINS_FOR_TUNING && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/15 px-2.5 py-0.5 text-[10px] font-bold text-amber-300">
+                <AlertTriangle className="h-3 w-3" /> Sample Too Small ({stats.totalWinCount}/{MIN_SAMPLE_WINS_FOR_TUNING} Wins)
+              </span>
+            )}
+          </div>
+          <p className="mb-2.5 mt-1 text-[11px] text-slate-400">
+            Delta ≥ +0.5 → Boost · −0.5 to +0.5 → Keep · ≤ −0.5 → Trim (<code>factor_weights.json</code>).
           </p>
           <div className="max-h-60 overflow-y-auto pr-1">
             <table className="w-full text-left text-[11px]">
@@ -310,7 +363,7 @@ export function TabProfitability({ settlements }: Props) {
                 {stats.factorDiagnostics
                   .filter((f) => f.sampleCount > 0)
                   .map((f) => (
-                    <tr key={f.key}>
+                    <tr key={f.key} className={stats.totalWinCount < MIN_SAMPLE_WINS_FOR_TUNING ? 'opacity-80' : ''}>
                       <td className="py-1.5 font-medium text-slate-200">{f.label}</td>
                       <td className="py-1.5 text-right text-slate-300">
                         {f.avgWinScore.toFixed(1)} vs {f.avgLossScore.toFixed(1)}{' '}
@@ -400,10 +453,16 @@ export function TabProfitability({ settlements }: Props) {
                           </span>{' '}
                           <span
                             className={`ml-1 rounded px-1.5 py-0.5 text-[10px] font-bold ${
-                              s.win_all.won ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-800 text-slate-400'
+                              s.win_all.void || s.win_all.scratched
+                                ? 'bg-amber-500/20 text-amber-300'
+                                : s.win_all.won
+                                ? 'bg-emerald-500/20 text-emerald-300'
+                                : 'bg-slate-800 text-slate-400'
                             }`}
                           >
-                            {s.win_all.won ? 'WON' : `${s.win_all.finish_position || '—'}th`}
+                            {s.win_all.won
+                              ? '1st · WON'
+                              : formatOrdinal(s.win_all.finish_position, s.win_all.void, s.win_all.scratched)}
                           </span>
                         </div>
                       ) : (
@@ -417,7 +476,7 @@ export function TabProfitability({ settlements }: Props) {
                       ) : null}
                     </td>
                     <td className="px-3 py-2.5 text-right">
-                      {s.win_all ? (
+                      {s.win_all && !s.win_all.void ? (
                         <input
                           type="number"
                           step="0.05"
@@ -427,43 +486,51 @@ export function TabProfitability({ settlements }: Props) {
                           className="w-20 rounded border border-slate-700 bg-slate-950 px-2 py-1 text-right text-xs text-slate-100 focus:border-emerald-500 focus:outline-none"
                         />
                       ) : (
-                        '—'
+                        <span className="text-[11px] text-amber-300/80">{s.win_all ? 'VOID' : '—'}</span>
                       )}
                     </td>
                     <td className="px-3 py-2.5 text-right">
                       {srm2 ? (
-                        <div className="flex items-center justify-end gap-1.5">
-                          <span className={`text-[10px] font-bold ${srm2.won ? 'text-emerald-400' : 'text-slate-500'}`}>
-                            {srm2.won ? 'W' : 'L'}
-                          </span>
-                          <input
-                            type="number"
-                            step="0.05"
-                            placeholder={srm2.settled_odds.toFixed(2)}
-                            value={overrides[overrideKey(s.settlement_id, 'srm_2leg')] ?? ''}
-                            onChange={(e) => updateOverride(s.settlement_id, 'srm_2leg', e.target.value)}
-                            className="w-20 rounded border border-slate-700 bg-slate-950 px-2 py-1 text-right text-xs text-slate-100 focus:border-emerald-500 focus:outline-none"
-                          />
-                        </div>
+                        srm2.void ? (
+                          <span className="text-[11px] text-amber-300/80">VOID</span>
+                        ) : (
+                          <div className="flex items-center justify-end gap-1.5">
+                            <span className={`text-[10px] font-bold ${srm2.won ? 'text-emerald-400' : 'text-slate-500'}`}>
+                              {srm2.won ? 'W' : 'L'}
+                            </span>
+                            <input
+                              type="number"
+                              step="0.05"
+                              placeholder={srm2.settled_odds.toFixed(2)}
+                              value={overrides[overrideKey(s.settlement_id, 'srm_2leg')] ?? ''}
+                              onChange={(e) => updateOverride(s.settlement_id, 'srm_2leg', e.target.value)}
+                              className="w-20 rounded border border-slate-700 bg-slate-950 px-2 py-1 text-right text-xs text-slate-100 focus:border-emerald-500 focus:outline-none"
+                            />
+                          </div>
+                        )
                       ) : (
                         '—'
                       )}
                     </td>
                     <td className="px-3 py-2.5 text-right">
                       {srm3 ? (
-                        <div className="flex items-center justify-end gap-1.5">
-                          <span className={`text-[10px] font-bold ${srm3.won ? 'text-emerald-400' : 'text-slate-500'}`}>
-                            {srm3.won ? 'W' : 'L'}
-                          </span>
-                          <input
-                            type="number"
-                            step="0.05"
-                            placeholder={srm3.settled_odds.toFixed(2)}
-                            value={overrides[overrideKey(s.settlement_id, 'srm_3leg')] ?? ''}
-                            onChange={(e) => updateOverride(s.settlement_id, 'srm_3leg', e.target.value)}
-                            className="w-20 rounded border border-slate-700 bg-slate-950 px-2 py-1 text-right text-xs text-slate-100 focus:border-emerald-500 focus:outline-none"
-                          />
-                        </div>
+                        srm3.void ? (
+                          <span className="text-[11px] text-amber-300/80">VOID</span>
+                        ) : (
+                          <div className="flex items-center justify-end gap-1.5">
+                            <span className={`text-[10px] font-bold ${srm3.won ? 'text-emerald-400' : 'text-slate-500'}`}>
+                              {srm3.won ? 'W' : 'L'}
+                            </span>
+                            <input
+                              type="number"
+                              step="0.05"
+                              placeholder={srm3.settled_odds.toFixed(2)}
+                              value={overrides[overrideKey(s.settlement_id, 'srm_3leg')] ?? ''}
+                              onChange={(e) => updateOverride(s.settlement_id, 'srm_3leg', e.target.value)}
+                              className="w-20 rounded border border-slate-700 bg-slate-950 px-2 py-1 text-right text-xs text-slate-100 focus:border-emerald-500 focus:outline-none"
+                            />
+                          </div>
+                        )
                       ) : (
                         '—'
                       )}

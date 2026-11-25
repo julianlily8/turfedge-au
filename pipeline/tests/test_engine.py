@@ -204,3 +204,46 @@ def test_go_timestamp_parsing_and_betfair_403_resilience():
     mock_http.get_text.side_effect = requests.HTTPError("403 Client Error: Forbidden")
     bf = BetfairBspSource(mock_http)
     assert bf.fetch_daily_bsp("2026-11-25") == {}
+
+
+def test_first_four_dividend_parsing_and_scratched_voiding():
+    from pipeline.src.sources.ladbrokes import LadbrokesSource
+
+    # Verify all First 4 / First Four / Superfecta dividend naming variants
+    divs = LadbrokesSource._parse_dividends(
+        [
+            {"product_name": "First Four", "dividend": 148.1},
+            {"product_name": "FIRST_4", "dividend": 152.5},
+            {"product_name": "SUPERFECTA", "dividend": 140.0},
+            {"product_name": "Exacta", "dividend": 20.3},
+            {"product_name": "Trifecta", "dividend": 51.4},
+            {"product_name": "Quadrella", "dividend": 420.0},
+        ]
+    )
+    assert divs["first4"] == 152.5
+    assert divs["exacta"] == 20.3
+    assert divs["trifecta"] == 51.4
+    assert divs["quaddie"] == 420.0
+
+    # Verify scratched / missing-position runner voids Win + affected SRM legs ($0 stake / $0 return)
+    race = _sample_race()
+    track_meta = {"name": "Royal Randwick", "home_straight_m": 410, "turning": "Clockwise"}
+    weather = {"source": "BOM Hourly API", "headwind_kmh": 0.0, "wind_speed_kmh": 5.0, "rain_expected_mm": 0.0, "effect": "Calm"}
+    race["scored_runners"] = score_race_23pt(race, track_meta, weather)
+    race.update(price_and_generate_bets(race))
+
+    top_num = race["win_selection"]["runner_number"]
+    other_nums = [r["runner_number"] for r in race["scored_runners"] if r["runner_number"] != top_num]
+    # Top selection scratched (absent from results)
+    results = [
+        {"position": idx + 1, "runner_number": rn, "name": f"Runner {rn}", "barrier": idx + 1, "margin_length": idx * 0.5}
+        for idx, rn in enumerate(other_nums)
+    ]
+    settled = settle_race(race, results, divs, scratched_numbers={top_num})
+    assert settled["win_all"]["void"] is True
+    assert settled["win_all"]["scratched"] is True
+    assert settled["win_all"]["stake"] == 0.0
+    assert settled["win_all"]["return"] == 0.0
+    assert settled["win_all"]["profit"] == 0.0
+    # Every SRM combo includes top_num as leg 1, so all must be voided
+    assert all(s["void"] is True and s["stake"] == 0.0 and s["profit"] == 0.0 for s in settled["srm"])

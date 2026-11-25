@@ -29,6 +29,44 @@ export interface CumulativePoint {
   exoticsCum: number;
 }
 
+export const MIN_SAMPLE_WINS_FOR_TUNING = 100;
+
+export const COMBINED_CATEGORY_OPTIONS: { key: string; shortLabel: string }[] = [
+  { key: 'win_all', shortLabel: 'Win (All)' },
+  { key: 'win_overlay', shortLabel: 'Win (Overlays)' },
+  { key: 'srm_2leg', shortLabel: '2-Leg SRM' },
+  { key: 'srm_3leg', shortLabel: '3-Leg SRM' },
+  { key: 'srm_4leg', shortLabel: '4-Leg SRM' },
+  { key: 'exacta', shortLabel: 'Exacta' },
+  { key: 'trifecta', shortLabel: 'Trifecta' },
+  { key: 'first4', shortLabel: 'First 4' },
+  { key: 'quaddie', shortLabel: 'Quaddie' },
+];
+
+export function formatOrdinal(
+  pos?: number | null,
+  isVoid?: boolean,
+  isScratched?: boolean
+): string {
+  if (isScratched || isVoid) return 'SCR';
+  if (pos === null || pos === undefined || pos <= 0 || Number.isNaN(pos)) {
+    return 'Unplaced';
+  }
+  const n = Math.trunc(pos);
+  const mod100 = n % 100;
+  if (mod100 >= 11 && mod100 <= 13) return `${n}th`;
+  switch (n % 10) {
+    case 1:
+      return `${n}st`;
+    case 2:
+      return `${n}nd`;
+    case 3:
+      return `${n}rd`;
+    default:
+      return `${n}th`;
+  }
+}
+
 export interface FactorDiagnostic {
   key: string;
   label: string;
@@ -102,12 +140,14 @@ function effectiveReturn(
 
 export function computeProfitability(
   settlements: SettlementDoc[],
-  overrides: OddsOverrideMap
+  overrides: OddsOverrideMap,
+  selectedCombinedKeys: string[] = ['win_all']
 ): {
   categories: BetCategoryMetrics[];
   overall: BetCategoryMetrics;
   cumulative: CumulativePoint[];
   factorDiagnostics: FactorDiagnostic[];
+  totalWinCount: number;
 } {
   const buckets: Record<string, { label: string; bets: number; wins: number; staked: number; ret: number }> = {
     win_all: { label: 'Win (All)', bets: 0, wins: 0, staked: 0, ret: 0 },
@@ -121,9 +161,9 @@ export function computeProfitability(
     quaddie: { label: 'Quaddie ($10 Flexi)', bets: 0, wins: 0, staked: 0, ret: 0 },
   };
 
-  const add = (key: string, stake: number, won: boolean, ret: number) => {
+  const add = (key: string, stake: number, won: boolean, ret: number, isVoid?: boolean) => {
     const b = buckets[key];
-    if (!b) return;
+    if (!b || isVoid || stake <= 0) return;
     b.bets += 1;
     if (won) b.wins += 1;
     b.staked += stake;
@@ -139,6 +179,7 @@ export function computeProfitability(
   let winOverlayCum = 0;
   let srm2Cum = 0;
   let exoticsCum = 0;
+  let totalWinCount = 0;
   const cumulative: CumulativePoint[] = [];
 
   // Factor attribution accumulators
@@ -151,13 +192,23 @@ export function computeProfitability(
   });
 
   ordered.forEach((s) => {
-    if (s.win_all) {
+    const winVoid = Boolean(
+      s.win_all &&
+        (s.win_all.void ||
+          s.win_all.scratched ||
+          s.win_all.stake <= 0 ||
+          s.win_all.finish_position === null ||
+          s.win_all.finish_position === undefined)
+    );
+
+    if (s.win_all && !winVoid) {
       const ov = overrides[overrideKey(s.settlement_id, 'win_all')];
       const ret = effectiveReturn(s.win_all.won, s.win_all.stake, s.win_all.return, ov);
-      add('win_all', s.win_all.stake, s.win_all.won, ret);
+      add('win_all', s.win_all.stake, s.win_all.won, ret, false);
       winAllCum = Math.round((winAllCum + ret - s.win_all.stake) * 100) / 100;
+      if (s.win_all.won) totalWinCount += 1;
 
-      // Factor attribution on #1 Win selections
+      // Factor attribution on non-void #1 Win selections
       if (s.top_runner_factor_scores) {
         Object.entries(s.top_runner_factor_scores).forEach(([fk, score]) => {
           const st = factorStats[fk];
@@ -172,18 +223,19 @@ export function computeProfitability(
       }
     }
 
-    if (s.win_overlay) {
+    if (s.win_overlay && !winVoid) {
       const ov = overrides[overrideKey(s.settlement_id, 'win_all')];
       const ret = effectiveReturn(s.win_overlay.won, s.win_overlay.stake, s.win_overlay.return, ov);
-      add('win_overlay', s.win_overlay.stake, s.win_overlay.won, ret);
+      add('win_overlay', s.win_overlay.stake, s.win_overlay.won, ret, s.win_overlay.void);
       winOverlayCum = Math.round((winOverlayCum + ret - s.win_overlay.stake) * 100) / 100;
     }
 
     (s.srm || []).forEach((srm) => {
+      if (srm.void || srm.stake <= 0) return;
       const key = `srm_${srm.leg_count}leg`;
       const ov = overrides[overrideKey(s.settlement_id, key)];
       const ret = effectiveReturn(srm.won, srm.stake, srm.return, ov);
-      add(key, srm.stake, srm.won, ret);
+      add(key, srm.stake, srm.won, ret, srm.void);
       if (srm.leg_count === 2) {
         srm2Cum = Math.round((srm2Cum + ret - srm.stake) * 100) / 100;
       }
@@ -191,17 +243,17 @@ export function computeProfitability(
 
     (['exacta', 'trifecta', 'first4'] as const).forEach((exKey) => {
       const bet = s[exKey];
-      if (!bet) return;
+      if (!bet || bet.void || bet.stake <= 0) return;
       const ov = overrides[overrideKey(s.settlement_id, exKey)];
       const ret = effectiveReturn(bet.won, bet.stake, bet.return, ov, bet.flexi_pct);
-      add(exKey, bet.stake, bet.won, ret);
+      add(exKey, bet.stake, bet.won, ret, bet.void);
       exoticsCum = Math.round((exoticsCum + ret - bet.stake) * 100) / 100;
     });
 
-    if (s.quaddie) {
+    if (s.quaddie && !s.quaddie.void && s.quaddie.stake > 0) {
       const ov = overrides[overrideKey(s.settlement_id, 'quaddie')];
       const ret = effectiveReturn(s.quaddie.won, s.quaddie.stake, s.quaddie.return, ov, s.quaddie.flexi_pct);
-      add('quaddie', s.quaddie.stake, s.quaddie.won, ret);
+      add('quaddie', s.quaddie.stake, s.quaddie.won, ret, s.quaddie.void);
       exoticsCum = Math.round((exoticsCum + ret - s.quaddie.stake) * 100) / 100;
     }
 
@@ -234,9 +286,10 @@ export function computeProfitability(
 
   const categories = Object.entries(buckets).map(([k, b]) => toMetrics(k, b));
 
-  // Overall (excluding win_overlay double-count since win_overlay is a subset of win_all)
+  // Combined rollup respects user-selected bet category checkboxes (defaults to ['win_all'])
+  const selectedSet = new Set(selectedCombinedKeys);
   const overallTotals = categories
-    .filter((c) => c.key !== 'win_overlay')
+    .filter((c) => selectedSet.has(c.key))
     .reduce(
       (acc, c) => ({
         bets: acc.bets + c.bets,
@@ -246,8 +299,9 @@ export function computeProfitability(
       }),
       { bets: 0, wins: 0, staked: 0, ret: 0 }
     );
-  const overall = toMetrics('overall', { label: 'All Portfolios Combined', ...overallTotals });
+  const overall = toMetrics('overall', { label: 'Selected Portfolios Combined', ...overallTotals });
 
+  // Strict delta threshold: delta >= +0.5 -> Boost Weight, -0.5 < delta < +0.5 -> Keep, delta <= -0.5 -> Trim Weight
   const factorDiagnostics: FactorDiagnostic[] = FACTOR_DEFINITIONS.map((f) => {
     const st = factorStats[f.key];
     const sampleCount = st.winScores.length + st.lossScores.length;
@@ -256,10 +310,17 @@ export function computeProfitability(
     const edgeDelta = Math.round((avgWin - avgLoss) * 100) / 100;
     const highScorePotPct =
       st.highStaked > 0 ? Math.round(((st.highRet - st.highStaked) / st.highStaked) * 1000) / 10 : null;
+
     let recommendation: FactorDiagnostic['recommendation'] = 'Keep';
-    if (sampleCount < 3) recommendation = 'Low Sample';
-    else if (edgeDelta >= 0.45 && (highScorePotPct === null || highScorePotPct >= 5)) recommendation = 'Boost Weight';
-    else if (edgeDelta <= -0.45 || (highScorePotPct !== null && highScorePotPct <= -20)) recommendation = 'Trim Weight';
+    if (st.winScores.length === 0 || st.lossScores.length === 0) {
+      recommendation = 'Low Sample';
+    } else if (edgeDelta >= 0.5) {
+      recommendation = 'Boost Weight';
+    } else if (edgeDelta <= -0.5) {
+      recommendation = 'Trim Weight';
+    } else {
+      recommendation = 'Keep';
+    }
 
     return {
       key: f.key,
@@ -274,5 +335,5 @@ export function computeProfitability(
     };
   }).sort((a, b) => b.edgeDelta - a.edgeDelta);
 
-  return { categories, overall, cumulative, factorDiagnostics };
+  return { categories, overall, cumulative, factorDiagnostics, totalWinCount };
 }

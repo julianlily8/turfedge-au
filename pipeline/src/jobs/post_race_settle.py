@@ -5,7 +5,7 @@ import logging
 import os
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from pipeline.src.engine.scorer_23pt import compute_meeting_bias
@@ -31,6 +31,30 @@ def _race_has_jumped(advertised_start: str, now_utc: datetime) -> bool:
     return now_utc >= (dt + timedelta(minutes=3))
 
 
+def _has_missing_exotic_dividend(settlement: Optional[Dict[str, Any]]) -> bool:
+    """Return True if any winning exotic bet (Exacta/Trifecta/First4) has a missing or $0 dividend/return."""
+    if not isinstance(settlement, dict):
+        return False
+    for key in ("exacta", "trifecta", "first4"):
+        bet = settlement.get(key)
+        if isinstance(bet, dict) and bet.get("won"):
+            div = bet.get("dividend")
+            ret = bet.get("return") or 0.0
+            if not div or float(div) <= 0.0 or float(ret) <= 0.0:
+                return True
+    return False
+
+
+def _has_unvoided_null_position(settlement: Optional[Dict[str, Any]]) -> bool:
+    """Return True if an older settlement doc graded a null-position runner as a loss instead of void."""
+    if not isinstance(settlement, dict):
+        return False
+    wa = settlement.get("win_all")
+    if isinstance(wa, dict) and not wa.get("void") and (wa.get("finish_position") is None):
+        return True
+    return False
+
+
 def run_settlement_for_date(date_str: str, store: FirestoreStore, http: PoliteHttpClient) -> None:
     races = store.query_by_field("races", "date", date_str)
     if not races:
@@ -46,14 +70,42 @@ def run_settlement_for_date(date_str: str, store: FirestoreStore, http: PoliteHt
 
     by_meeting: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     settled_updates = 0
+    cleaned_baseline = 0
 
     for race in races:
         slug = race.get("meeting_slug") or "unknown"
         already_settled = bool(race.get("settled"))
-        bsp_reconciled = bool((race.get("settlement") or {}).get("bsp_reconciled"))
+        existing_settlement = race.get("settlement") or {}
 
-        # Re-process if not settled yet OR if Betfair BSP just became available for yesterday's races
-        needs_fetch = (not already_settled and _race_has_jumped(race.get("advertised_start") or "", now_utc))
+        # Strict POT% Integrity Gate: ONLY settle races that completed T-25m pre-jump analysis!
+        # Remove any stale pre-deploy baseline settlements so baseline runs never pollute live model POT%.
+        if not race.get("pre_jump_analyzed"):
+            if already_settled:
+                store.delete_doc("settlements", race["race_id"])
+                store.set_doc(
+                    "races",
+                    race["race_id"],
+                    {"settled": False, "settlement": None, "updated_at": now_utc.isoformat()},
+                    merge=True,
+                )
+                cleaned_baseline += 1
+            by_meeting[slug].append(race)
+            continue
+
+        bsp_reconciled = bool(existing_settlement.get("bsp_reconciled"))
+        missing_exotic_div = _has_missing_exotic_dividend(existing_settlement)
+        needs_void_repair = _has_unvoided_null_position(existing_settlement)
+
+        # Re-process if:
+        # 1) Not settled yet and past jump time, OR
+        # 2) An exotic hit had $0 / missing dividend on first pass (delayed tote declaration), OR
+        # 3) Needs void-runner repair, OR
+        # 4) Betfair BSP CSV just became available.
+        needs_fetch = (
+            (not already_settled and _race_has_jumped(race.get("advertised_start") or "", now_utc))
+            or missing_exotic_div
+            or needs_void_repair
+        )
         needs_bsp_enrich = (already_settled and not bsp_reconciled and bool(bsp_lookup))
 
         if not needs_fetch and not needs_bsp_enrich:
@@ -63,6 +115,11 @@ def run_settlement_for_date(date_str: str, store: FirestoreStore, http: PoliteHt
         results = race.get("results") or []
         dividends = race.get("dividends") or {}
         status = race.get("status") or "Open"
+        scratched_numbers = {
+            int(r.get("runner_number") or 0)
+            for r in (race.get("scored_runners") or [])
+            if r.get("is_scratched")
+        }
 
         if needs_fetch:
             try:
@@ -70,6 +127,9 @@ def run_settlement_for_date(date_str: str, store: FirestoreStore, http: PoliteHt
                 results = ev.get("results") or []
                 dividends = ev.get("dividends") or {}
                 status = ev.get("status") or status
+                for lr in ev.get("runners") or []:
+                    if lr.get("is_scratched"):
+                        scratched_numbers.add(int(lr.get("runner_number") or 0))
             except Exception as exc:
                 logger.error("Failed fetching post-race results for %s: %s", race["race_id"], exc)
                 by_meeting[slug].append(race)
@@ -79,7 +139,13 @@ def run_settlement_for_date(date_str: str, store: FirestoreStore, http: PoliteHt
             by_meeting[slug].append(race)
             continue
 
-        settlement_doc = settle_race(race, results=results, dividends=dividends, bsp_lookup=bsp_lookup)
+        settlement_doc = settle_race(
+            race,
+            results=results,
+            dividends=dividends,
+            bsp_lookup=bsp_lookup,
+            scratched_numbers=scratched_numbers,
+        )
         now_iso = datetime.now(timezone.utc).isoformat()
         settlement_doc["settled_at"] = now_iso
 
@@ -107,7 +173,9 @@ def run_settlement_for_date(date_str: str, store: FirestoreStore, http: PoliteHt
 
         settled_m_races = [r for r in m_races if r.get("results")]
         meeting_bias = compute_meeting_bias(settled_m_races)
-        quaddie_settlement = settle_meeting_quaddie(meeting, m_races)
+        # Only settle quaddie if all 4 legs completed pre-jump analysis
+        analyzed_m_races = [r for r in m_races if r.get("pre_jump_analyzed")]
+        quaddie_settlement = settle_meeting_quaddie(meeting, analyzed_m_races)
 
         update_m: Dict[str, Any] = {
             "meeting_bias": meeting_bias,
@@ -120,7 +188,12 @@ def run_settlement_for_date(date_str: str, store: FirestoreStore, http: PoliteHt
 
         store.set_doc("meetings", meeting_doc_id, update_m, merge=True)
 
-    logger.info("Post-race settlement finished for %s (%d race(s) settled/enriched).", date_str, settled_updates)
+    logger.info(
+        "Post-race settlement finished for %s (%d race(s) settled/enriched, %d non-analyzed baseline settlement(s) cleaned).",
+        date_str,
+        settled_updates,
+        cleaned_baseline,
+    )
 
 
 def main() -> None:

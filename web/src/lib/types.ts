@@ -228,6 +228,8 @@ export interface SettledWinBet {
   runner_name: string;
   stake: number;
   won: boolean;
+  void?: boolean;
+  scratched?: boolean;
   finish_position?: number | null;
   settled_odds: number;
   tote_sp?: number | null;
@@ -251,6 +253,7 @@ export interface SettledSrmBet {
   legs: SrmLeg[];
   stake: number;
   won: boolean;
+  void?: boolean;
   raw_harville_odds: number;
   haircut_factor: number;
   settled_odds: number;
@@ -267,6 +270,7 @@ export interface SettledExoticBet {
   legs_won?: number;
   stake: number;
   won: boolean;
+  void?: boolean;
   dividend: number | null;
   actual_odds_override?: number | null;
   return: number;

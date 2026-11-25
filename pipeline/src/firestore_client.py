@@ -78,6 +78,14 @@ class FirestoreStore:
             return
         self.db.collection(collection).document(doc_id).set(data, merge=merge)
 
+    def delete_doc(self, collection: str, doc_id: str) -> None:
+        if self.dry_run:
+            path = self._local_path(collection, doc_id)
+            if path.exists():
+                path.unlink()
+            return
+        self.db.collection(collection).document(doc_id).delete()
+
     def query_by_field(self, collection: str, field: str, value: Any) -> List[Dict[str, Any]]:
         if self.dry_run:
             col_dir = self.local_dir / collection

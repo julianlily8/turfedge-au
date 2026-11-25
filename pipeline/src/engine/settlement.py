@@ -30,15 +30,21 @@ def settle_race(
     results: List[Dict[str, Any]],
     dividends: Dict[str, Any],
     bsp_lookup: Optional[Dict[str, Dict[str, Any]]] = None,
+    scratched_numbers: Optional[set] = None,
 ) -> Dict[str, Any]:
     """
     Settle all pre-race recommendations on standardized $10 unit stakes.
+    - Voids bets ($0 stake / $0 return) when the selection or any SRM leg is scratched or lacks a valid finishing position.
     - Applies conservative 0.75x correlation haircut on SRM Harville odds.
     - Preserves actual_odds_override hook for manual settlement edits in Tab 2.
     - Attaches Betfair BSP Win/Place prices when published.
     """
     pos_map = _finish_position_map(results)
     bsp_lookup = bsp_lookup or {}
+    scratched_set = set(scratched_numbers or set())
+    for r in race.get("scored_runners") or []:
+        if r.get("is_scratched"):
+            scratched_set.add(int(r.get("runner_number") or 0))
 
     top4_order = [r["runner_number"] for r in sorted(results, key=lambda x: x["position"])[:4]]
     best_tote_win = dividends.get("best_tote_win") or {}
@@ -49,7 +55,10 @@ def settle_race(
 
     if win_sel:
         rn = int(win_sel["runner_number"])
-        won = pos_map.get(rn) == 1
+        finish_pos = pos_map.get(rn)
+        is_scratched = rn in scratched_set
+        is_void = is_scratched or (finish_pos is None) or (finish_pos <= 0)
+
         tote_div = float(best_tote_win.get(str(rn)) or 0.0)
         sp_div = tote_div if tote_div > 1.0 else float(win_sel.get("live_price") or win_sel.get("opening_price") or 0.0)
 
@@ -57,24 +66,38 @@ def settle_race(
         win_bsp = bsp_entry.get("win_bsp") if bsp_entry else None
         effective_odds = sp_div if sp_div > 1.0 else (win_bsp or 0.0)
 
-        ret = round(UNIT_STAKE * effective_odds, 2) if (won and effective_odds > 0) else 0.0
-        bsp_ret = round(UNIT_STAKE * win_bsp, 2) if (won and win_bsp) else (0.0 if win_bsp else None)
+        if is_void:
+            won = False
+            stake = 0.0
+            ret = 0.0
+            profit = 0.0
+            bsp_ret = 0.0 if win_bsp else None
+            bsp_profit = 0.0 if win_bsp else None
+        else:
+            won = finish_pos == 1
+            stake = UNIT_STAKE
+            ret = round(UNIT_STAKE * effective_odds, 2) if (won and effective_odds > 0) else 0.0
+            profit = round(ret - UNIT_STAKE, 2)
+            bsp_ret = round(UNIT_STAKE * win_bsp, 2) if (won and win_bsp) else (0.0 if win_bsp else None)
+            bsp_profit = round(bsp_ret - UNIT_STAKE, 2) if bsp_ret is not None else None
 
         win_bet = {
             "category": "win_all",
             "runner_number": rn,
             "runner_name": win_sel["name"],
-            "stake": UNIT_STAKE,
+            "stake": stake,
             "won": won,
-            "finish_position": pos_map.get(rn),
+            "void": is_void,
+            "scratched": is_scratched,
+            "finish_position": finish_pos,
             "settled_odds": round(effective_odds, 2),
             "tote_sp": round(tote_div, 2) if tote_div > 0 else None,
             "betfair_bsp": win_bsp,
             "actual_odds_override": None,
             "return": ret,
-            "profit": round(ret - UNIT_STAKE, 2),
+            "profit": profit,
             "bsp_return": bsp_ret,
-            "bsp_profit": round(bsp_ret - UNIT_STAKE, 2) if bsp_ret is not None else None,
+            "bsp_profit": bsp_profit,
             "is_value_overlay": bool(win_sel.get("is_value_overlay")),
             "rated_price": win_sel.get("rated_price"),
             "live_price": win_sel.get("live_price"),
@@ -85,29 +108,46 @@ def settle_race(
         if win_sel.get("is_value_overlay"):
             overlay_bet = dict(win_bet, category="win_overlay")
 
-    # Same Race Multi settlement (with 0.75x correlation haircut)
+    # Same Race Multi settlement (with 0.75x correlation haircut & scratching/missing-position voiding)
     srm_settlements: List[Dict[str, Any]] = []
     for combo in race.get("srm_combos") or []:
         legs = combo.get("legs") or []
-        all_won = bool(legs) and all(_srm_leg_won(pos_map.get(int(leg["runner_number"])), leg["market"]) for leg in legs)
+        leg_void = (not legs) or any(
+            (int(leg["runner_number"]) in scratched_set)
+            or (pos_map.get(int(leg["runner_number"])) is None)
+            or (pos_map.get(int(leg["runner_number"])) <= 0)
+            for leg in legs
+        )
         raw_harville = float(combo.get("raw_harville_odds") or combo.get("estimated_odds") or 1.0)
         haircut = float(combo.get("haircut_factor") or SRM_CORRELATION_HAIRCUT)
         est_odds = round(float(combo.get("estimated_odds") or max(1.25, raw_harville * haircut)), 2)
-        ret = round(UNIT_STAKE * est_odds, 2) if all_won else 0.0
+
+        if leg_void:
+            all_won = False
+            stake = 0.0
+            ret = 0.0
+            profit = 0.0
+        else:
+            all_won = all(_srm_leg_won(pos_map.get(int(leg["runner_number"])), leg["market"]) for leg in legs)
+            stake = UNIT_STAKE
+            ret = round(UNIT_STAKE * est_odds, 2) if all_won else 0.0
+            profit = round(ret - UNIT_STAKE, 2)
+
         srm_settlements.append(
             {
                 "category": f"srm_{combo['leg_count']}leg",
                 "leg_count": int(combo["leg_count"]),
                 "label": combo.get("label") or f"{combo['leg_count']}-Leg SRM",
                 "legs": legs,
-                "stake": UNIT_STAKE,
+                "stake": stake,
                 "won": all_won,
+                "void": leg_void,
                 "raw_harville_odds": round(raw_harville, 2),
                 "haircut_factor": haircut,
                 "settled_odds": est_odds,
                 "actual_odds_override": None,
                 "return": ret,
-                "profit": round(ret - UNIT_STAKE, 2),
+                "profit": profit,
             }
         )
 
