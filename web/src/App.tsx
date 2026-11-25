@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { Activity, BarChart3, Cloud, Database, RefreshCw } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Activity, BarChart3, CalendarClock, Cloud, Database, RefreshCw } from 'lucide-react';
 import {
   fetchAvailableDates,
   fetchMeetingsByDate,
@@ -26,71 +26,117 @@ function getTodaySydneyIso(): string {
 }
 
 export default function App() {
+  const todayIso = getTodaySydneyIso();
   const [activeTab, setActiveTab] = useState<'upcoming' | 'profitability'>('upcoming');
-  const [dates, setDates] = useState<string[]>([getTodaySydneyIso()]);
-  const [selectedDate, setSelectedDate] = useState<string>(getTodaySydneyIso());
+  const [dates, setDates] = useState<string[]>([todayIso]);
+  const [selectedDate, setSelectedDate] = useState<string>(todayIso);
   const [meetings, setMeetings] = useState<MeetingDoc[]>([]);
   const [races, setRaces] = useState<RaceDoc[]>([]);
   const [manualRaces, setManualRaces] = useState<RaceDoc[]>([]);
   const [settlements, setSettlements] = useState<SettlementDoc[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [usingDemo, setUsingDemo] = useState<boolean>(!isFirebaseConfigured);
+  const [loadingRaces, setLoadingRaces] = useState<boolean>(true);
+  const [loadingSettlements, setLoadingSettlements] = useState<boolean>(true);
+  const [fallbackDateNotice, setFallbackDateNotice] = useState<string | null>(null);
+  const [settlementError, setSettlementError] = useState<string | null>(null);
+  const hasAutoSelectedRef = useRef<boolean>(false);
 
-  const loadCloudData = async (targetDate: string) => {
-    setLoading(true);
+  // Tab 2 (Settlements) is completely decoupled from Tab 1's date/meetings queries
+  // and NEVER substitutes hardcoded mock data when Firebase is configured.
+  const loadSettlements = async () => {
+    setLoadingSettlements(true);
+    setSettlementError(null);
+    if (!isFirebaseConfigured) {
+      const demo = buildDemoPreviewData();
+      setSettlements(demo.settlements);
+      setLoadingSettlements(false);
+      return;
+    }
+    try {
+      const sList = await fetchSettlements();
+      setSettlements(sList);
+    } catch (err) {
+      console.error('Firestore settlements read error:', err);
+      setSettlementError('Could not load settlements from Firestore. Try refreshing in a moment.');
+    } finally {
+      setLoadingSettlements(false);
+    }
+  };
+
+  // Tab 1 (Upcoming & Recent Races) loads independently and lets users browse
+  // recent/yesterday meetings automatically before today's 8:27 AM AEDT ingestion runs.
+  const loadRaceDay = async (targetDate: string, allowAutoFallback: boolean) => {
+    setLoadingRaces(true);
+    setFallbackDateNotice(null);
+
     if (!isFirebaseConfigured) {
       const demo = buildDemoPreviewData();
       setMeetings(demo.meetings);
       setRaces(demo.races);
-      setSettlements(demo.settlements);
-      setUsingDemo(true);
-      setLoading(false);
+      setLoadingRaces(false);
       return;
     }
 
     try {
-      const [availDates, mList, rList, sList] = await Promise.all([
+      const [availDates, mList, rList] = await Promise.all([
         fetchAvailableDates(),
         fetchMeetingsByDate(targetDate),
         fetchRacesByDate(targetDate),
-        fetchSettlements(),
       ]);
 
-      const mergedDates = Array.from(new Set([targetDate, ...availDates])).sort((a, b) =>
+      const mergedDates = Array.from(new Set([todayIso, targetDate, ...availDates])).sort((a, b) =>
         b.localeCompare(a)
       );
       setDates(mergedDates);
 
-      if (mList.length === 0 && rList.length === 0 && sList.length === 0) {
-        // Fallback to demo preview only until the first GitHub Actions run populates Firestore
-        const demo = buildDemoPreviewData();
-        setMeetings(demo.meetings);
-        setRaces(demo.races);
-        setSettlements(demo.settlements);
-        setUsingDemo(true);
-      } else {
-        setMeetings(mList);
-        setRaces(rList);
-        setSettlements(sList);
-        setUsingDemo(false);
+      // Before 8:27 AM AEDT when today's meetings aren't ingested yet, auto-display
+      // the latest available meeting date from Firestore instead of an empty screen or mock data.
+      if (allowAutoFallback && mList.length === 0 && rList.length === 0 && availDates.length > 0) {
+        const latestAvailable = availDates[0];
+        if (latestAvailable && latestAvailable !== targetDate) {
+          const [prevM, prevR] = await Promise.all([
+            fetchMeetingsByDate(latestAvailable),
+            fetchRacesByDate(latestAvailable),
+          ]);
+          setSelectedDate(latestAvailable);
+          setMeetings(prevM);
+          setRaces(prevR);
+          setFallbackDateNotice(
+            `Today's (${todayIso}) card ingests at 8:27 AM AEDT — showing latest available Firestore meetings (${latestAvailable}).`
+          );
+          return;
+        }
       }
+
+      setMeetings(mList);
+      setRaces(rList);
     } catch (err) {
-      console.error('Firestore read error:', err);
-      const demo = buildDemoPreviewData();
-      setMeetings(demo.meetings);
-      setRaces(demo.races);
-      setSettlements(demo.settlements);
-      setUsingDemo(true);
+      console.error('Firestore meetings/races read error:', err);
+      setMeetings([]);
+      setRaces([]);
     } finally {
-      setLoading(false);
+      setLoadingRaces(false);
     }
   };
 
+  // Load real settlements once on mount (decoupled from selectedDate)
   useEffect(() => {
-    loadCloudData(selectedDate);
+    loadSettlements();
+  }, []);
+
+  // Load meetings/races whenever selectedDate changes
+  useEffect(() => {
+    const allowAuto = !hasAutoSelectedRef.current && selectedDate === todayIso;
+    hasAutoSelectedRef.current = true;
+    loadRaceDay(selectedDate, allowAuto);
   }, [selectedDate]);
 
+  const handleRefreshAll = () => {
+    loadRaceDay(selectedDate, false);
+    loadSettlements();
+  };
+
   const combinedRaces = [...races, ...manualRaces];
+  const loading = loadingRaces || loadingSettlements;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
@@ -137,12 +183,23 @@ export default function App() {
                 }`}
               >
                 <BarChart3 className="h-3.5 w-3.5" /> Results &amp; Profitability
+                {isFirebaseConfigured && (
+                  <span
+                    className={`rounded-full px-1.5 py-0.2 text-[10px] font-bold tabular-nums ${
+                      activeTab === 'profitability'
+                        ? 'bg-slate-950/20 text-slate-950'
+                        : 'bg-slate-800 text-slate-300'
+                    }`}
+                  >
+                    {settlements.length}
+                  </span>
+                )}
               </button>
             </div>
 
             <button
               type="button"
-              onClick={() => loadCloudData(selectedDate)}
+              onClick={handleRefreshAll}
               title="Refresh from Cloud Firestore"
               className="rounded-xl border border-slate-800 bg-slate-900 p-2 text-slate-300 hover:border-slate-700 hover:text-white"
             >
@@ -152,13 +209,24 @@ export default function App() {
         </div>
       </header>
 
-      {/* Cloud Status Banner */}
-      {usingDemo && (
+      {/* Status Banners (Only offline unconfigured preview OR helpful Tab 1 date notice) */}
+      {!isFirebaseConfigured && (
         <div className="border-b border-amber-500/20 bg-amber-500/10 px-4 py-2 text-center text-xs text-amber-200">
           <Cloud className="mr-1.5 inline h-3.5 w-3.5" />
-          {isFirebaseConfigured
-            ? 'Connected to Firestore — showing preview data until your first GitHub Actions Morning Ingestion run populates today’s meetings.'
-            : 'Preview Mode — configure Firebase web env variables & deploy to stream live daily Australian meetings from Cloud Firestore.'}
+          Local Preview Mode — Firebase web env variables are not configured.
+        </div>
+      )}
+
+      {isFirebaseConfigured && activeTab === 'upcoming' && fallbackDateNotice && (
+        <div className="border-b border-sky-500/20 bg-sky-500/10 px-4 py-2 text-center text-xs text-sky-200">
+          <CalendarClock className="mr-1.5 inline h-3.5 w-3.5" />
+          {fallbackDateNotice}
+        </div>
+      )}
+
+      {settlementError && activeTab === 'profitability' && (
+        <div className="border-b border-rose-500/20 bg-rose-500/10 px-4 py-2 text-center text-xs text-rose-200">
+          {settlementError}
         </div>
       )}
 
@@ -174,7 +242,7 @@ export default function App() {
             onManualRaceAdded={(r) => setManualRaces((prev) => [r, ...prev])}
           />
         ) : (
-          <TabProfitability settlements={settlements} />
+          <TabProfitability settlements={settlements} loading={loadingSettlements} />
         )}
       </main>
 

@@ -55,6 +55,16 @@ def _has_unvoided_null_position(settlement: Optional[Dict[str, Any]]) -> bool:
     return False
 
 
+def _settled_within_hours(race: Dict[str, Any], now_utc: datetime, hours: float = 48.0) -> bool:
+    """Return True if a settled race was settled (or jumped) within the last `hours` hours."""
+    ts = race.get("settled_at") or (race.get("settlement") or {}).get("settled_at") or race.get("advertised_start") or ""
+    dt = parse_utc_timestamp(ts)
+    if dt is None:
+        return True
+    age_hours = (now_utc - dt).total_seconds() / 3600.0
+    return age_hours <= hours
+
+
 def run_settlement_for_date(date_str: str, store: FirestoreStore, http: PoliteHttpClient) -> None:
     races = store.query_by_field("races", "date", date_str)
     if not races:
@@ -74,7 +84,8 @@ def run_settlement_for_date(date_str: str, store: FirestoreStore, http: PoliteHt
 
     for race in races:
         slug = race.get("meeting_slug") or "unknown"
-        already_settled = bool(race.get("settled"))
+        status_lower = (race.get("status") or "").lower()
+        already_settled = bool(race.get("settled")) or (status_lower == "settled")
         existing_settlement = race.get("settlement") or {}
 
         # Strict POT% Integrity Gate: ONLY settle races that completed T-25m pre-jump analysis!
@@ -92,21 +103,20 @@ def run_settlement_for_date(date_str: str, store: FirestoreStore, http: PoliteHt
             by_meeting[slug].append(race)
             continue
 
+        within_48h = _settled_within_hours(race, now_utc, hours=48.0)
         bsp_reconciled = bool(existing_settlement.get("bsp_reconciled"))
         missing_exotic_div = _has_missing_exotic_dividend(existing_settlement)
         needs_void_repair = _has_unvoided_null_position(existing_settlement)
 
         # Re-process if:
         # 1) Not settled yet and past jump time, OR
-        # 2) An exotic hit had $0 / missing dividend on first pass (delayed tote declaration), OR
-        # 3) Needs void-runner repair, OR
-        # 4) Betfair BSP CSV just became available.
+        # 2) Settled within the past 48h and missing an exotic dividend / needs void repair, OR
+        # 3) Settled within the past 48h and Betfair BSP CSV is now available.
         needs_fetch = (
             (not already_settled and _race_has_jumped(race.get("advertised_start") or "", now_utc))
-            or missing_exotic_div
-            or needs_void_repair
+            or (within_48h and (missing_exotic_div or needs_void_repair))
         )
-        needs_bsp_enrich = (already_settled and not bsp_reconciled and bool(bsp_lookup))
+        needs_bsp_enrich = (already_settled and within_48h and not bsp_reconciled and bool(bsp_lookup))
 
         if not needs_fetch and not needs_bsp_enrich:
             by_meeting[slug].append(race)
@@ -135,7 +145,7 @@ def run_settlement_for_date(date_str: str, store: FirestoreStore, http: PoliteHt
                 by_meeting[slug].append(race)
                 continue
 
-        if not results or status.lower() not in ("final", "paying", "closed"):
+        if not results or status.lower() not in ("final", "paying", "closed", "settled"):
             by_meeting[slug].append(race)
             continue
 
@@ -147,15 +157,15 @@ def run_settlement_for_date(date_str: str, store: FirestoreStore, http: PoliteHt
             scratched_numbers=scratched_numbers,
         )
         now_iso = datetime.now(timezone.utc).isoformat()
-        settlement_doc["settled_at"] = now_iso
+        settlement_doc["settled_at"] = race.get("settled_at") or now_iso
 
         race_update = {
-            "status": "Final",
+            "status": "Settled",
             "results": results,
             "dividends": dividends,
             "settlement": settlement_doc,
             "settled": True,
-            "settled_at": now_iso,
+            "settled_at": settlement_doc["settled_at"],
             "updated_at": now_iso,
         }
         store.set_doc("races", race["race_id"], race_update, merge=True)
@@ -209,8 +219,9 @@ def main() -> None:
         dates = [args.date]
     else:
         today = datetime.now(SYDNEY_TZ).date()
-        # Process today for real-time settlement + yesterday for next-morning Betfair BSP reconciliation
-        dates = [today.strftime("%Y-%m-%d"), (today - timedelta(days=1)).strftime("%Y-%m-%d")]
+        # Multi-day lookback (today + past 3 days) so night meetings, delayed exotic dividends,
+        # and next-morning Betfair BSP CSV reconciliation are always caught.
+        dates = [(today - timedelta(days=offset)).strftime("%Y-%m-%d") for offset in range(4)]
 
     for d in dates:
         run_settlement_for_date(d, store=store, http=http)

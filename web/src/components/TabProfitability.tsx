@@ -26,9 +26,10 @@ import {
 
 interface Props {
   settlements: SettlementDoc[];
+  loading?: boolean;
 }
 
-export function TabProfitability({ settlements }: Props) {
+export function TabProfitability({ settlements, loading = false }: Props) {
   const [filters, setFilters] = useState<ProfitabilityFilters>({
     trackCondition: 'All',
     distanceBand: 'All',
@@ -71,6 +72,18 @@ export function TabProfitability({ settlements }: Props) {
 
   const winAll = stats.categories.find((c) => c.key === 'win_all');
   const winOverlay = stats.categories.find((c) => c.key === 'win_overlay');
+
+  if (!loading && settlements.length === 0) {
+    return (
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-10 text-center">
+        <h2 className="text-base font-bold text-white">No Settled Races in Firestore Yet</h2>
+        <p className="mx-auto mt-2 max-w-md text-xs text-slate-400">
+          Only races that complete T-25m pre-jump analysis are settled here. Once races finish,{' '}
+          <code>post-race-settle.yml</code> automatically records official tote dividends and Betfair BSPs every 45 minutes.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-5">
