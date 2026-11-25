@@ -6,12 +6,14 @@ import os
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
+from pipeline.src.engine.gemini_batch import GeminiBatchAnalyzer
 from pipeline.src.engine.pricing import build_meeting_quaddie, price_and_generate_bets
 from pipeline.src.engine.scorer_23pt import compute_meeting_bias, score_race_23pt
 from pipeline.src.firestore_client import FirestoreStore
 from pipeline.src.http_client import PoliteHttpClient
 from pipeline.src.sources.ladbrokes import LadbrokesSource
 from pipeline.src.sources.weather import WeatherSource
+from pipeline.src.sources.youtube import fetch_transcripts_for_urls, load_configured_youtube_urls
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("morning_ingest")
@@ -32,6 +34,8 @@ def run_morning_ingest(date_str: str, dry_run: bool = False, max_meetings: int =
     store = FirestoreStore(dry_run=dry_run)
     ladbrokes = LadbrokesSource(http)
     weather_src = WeatherSource(http)
+    gemini = GeminiBatchAnalyzer()
+    yt_fs_config = store.get_doc("config", "youtube_previews")
 
     meetings = ladbrokes.fetch_aus_meetings(date_str, include_country=False)
     if max_meetings > 0:
@@ -49,8 +53,12 @@ def run_morning_ingest(date_str: str, dry_run: bool = False, max_meetings: int =
 
         weather = weather_src.fetch_track_weather(meeting["track_meta"])
         meeting_bias = compute_meeting_bias([])
+        yt_urls = load_configured_youtube_urls(date_str, slug, firestore_config=yt_fs_config)
+        yt_transcript = fetch_transcripts_for_urls(yt_urls) if yt_urls else ""
 
-        meeting_races = []
+        fetched_events = []
+        existing_map = {}
+        summary_map = {}
         rail_position = "True"
 
         for r_summary in meeting["races"]:
@@ -74,6 +82,8 @@ def run_morning_ingest(date_str: str, dry_run: bool = False, max_meetings: int =
 
             # Preserve morning opening prices if race already ingested earlier today
             existing = store.get_doc("races", race_id)
+            existing_map[race_id] = existing
+            summary_map[race_id] = r_summary
             existing_open_map = {}
             if existing:
                 for er in existing.get("scored_runners") or existing.get("runners") or []:
@@ -87,8 +97,33 @@ def run_morning_ingest(date_str: str, dry_run: bool = False, max_meetings: int =
                 elif runner["opening_win"] <= 1.0 and runner["live_win"] > 1.0:
                     runner["opening_win"] = runner["live_win"]
 
-            scored = score_race_23pt(ev, meeting["track_meta"], weather, meeting_bias=meeting_bias)
+            scored = score_race_23pt(
+                ev,
+                meeting["track_meta"],
+                weather,
+                meeting_bias=meeting_bias,
+                youtube_transcript=yt_transcript,
+            )
             ev["scored_runners"] = scored
+            fetched_events.append(ev)
+
+        # Run Gemini meeting-level batch at 8:27 AM so EVERY race on the card gets full
+        # Gemini ratings, #1 Win, SRM, Exotic, and Quaddie picks immediately (immune to cron jitter!).
+        if fetched_events:
+            ai_meta = gemini.analyze_meeting_batch(
+                meeting_name=meeting["display_name"],
+                weather=weather,
+                meeting_bias=meeting_bias,
+                races=fetched_events,
+                youtube_transcript=yt_transcript,
+            )
+            logger.info("Morning Gemini baseline batch for %s: %s", meeting["display_name"], ai_meta)
+
+        meeting_races = []
+        for ev in fetched_events:
+            race_id = ev["race_id"]
+            existing = existing_map.get(race_id)
+            r_summary = summary_map.get(race_id, {})
             pricing = price_and_generate_bets(ev)
 
             race_doc = {
@@ -115,17 +150,21 @@ def run_morning_ingest(date_str: str, dry_run: bool = False, max_meetings: int =
                 "race_comment": ev["race_comment"],
                 "prize_money": ev["prize_money"],
                 "positions_paid": ev["positions_paid"],
-                "scored_runners": scored,
+                "scored_runners": ev["scored_runners"],
                 "win_selection": pricing["win_selection"],
                 "top_10": pricing["top_10"],
                 "srm_combos": pricing["srm_combos"],
                 "exotics": pricing["exotics"],
                 "results": ev["results"],
                 "dividends": ev["dividends"],
+                "baseline_analyzed": True,
+                "baseline_analyzed_at": now_iso,
                 "pre_jump_analyzed": bool(existing.get("pre_jump_analyzed")) if existing else False,
+                "pre_jump_stage": existing.get("pre_jump_stage") if existing else None,
                 "settled": bool(existing.get("settled")) if existing else False,
-                "ai_summary": existing.get("ai_summary", "") if existing else "",
-                "ai_model": existing.get("ai_model") if existing else None,
+                "ai_summary": ev.get("ai_summary") or (existing.get("ai_summary", "") if existing else ""),
+                "ai_model": ev.get("ai_model") or (existing.get("ai_model") if existing else None),
+                "youtube_urls_used": yt_urls,
                 "ingested_at": now_iso,
                 "updated_at": now_iso,
             }

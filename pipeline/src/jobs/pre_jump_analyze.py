@@ -21,9 +21,11 @@ logger = logging.getLogger("pre_jump_analyze")
 
 SYDNEY_TZ = ZoneInfo("Australia/Sydney")
 
-# Widened pre-jump analysis window (T-5m to T-60m) so GitHub Actions cron jitter never skips a race
-WINDOW_MIN_MINUTES = 5.0
-WINDOW_MAX_MINUTES = 60.0
+# Widened pre-jump scan window (T-2m to T-120m) so GitHub Actions cron jitter never skips a race.
+# Races analyzed early (T-40..T-120m) are tagged 'early' and upgraded/locked once more at T-2..T-40m ('final').
+WINDOW_MIN_MINUTES = 2.0
+WINDOW_MAX_MINUTES = 120.0
+FINAL_LOCK_THRESHOLD_MINUTES = 40.0
 
 
 def parse_utc_timestamp(ts: str) -> Optional[datetime]:
@@ -75,18 +77,28 @@ def run_pre_jump_analysis(date_str: str, dry_run: bool = False, force_all: bool 
         all_by_meeting[slug].append(race)
 
         status = (race.get("status") or "Open").lower()
-        if status in ("final", "closed", "abandoned", "paying"):
-            continue
-        if race.get("pre_jump_analyzed") and not force_all:
+        if status in ("final", "closed", "abandoned", "paying", "settled"):
             continue
 
         mins = _minutes_until_jump(race.get("advertised_start") or "", now_utc)
+        already_analyzed = bool(race.get("pre_jump_analyzed"))
+        stage = race.get("pre_jump_stage") or ("final" if already_analyzed else None)
+
+        # Skip if already locked in the final T-2..T-40m window (unless force_all)
+        if already_analyzed and stage == "final" and not force_all:
+            continue
+        # If an early T-40..T-120m pass already ran, only re-score once the race enters T-2..T-40m
+        if already_analyzed and stage == "early" and not force_all:
+            if mins is None or not (WINDOW_MIN_MINUTES <= mins <= FINAL_LOCK_THRESHOLD_MINUTES):
+                continue
+
         if force_all or (mins is not None and WINDOW_MIN_MINUTES <= mins <= WINDOW_MAX_MINUTES):
+            race["_mins_to_jump"] = mins
             by_meeting[slug].append(race)
 
     if not by_meeting:
         logger.info(
-            "No unanalyzed races within T-%.0fm..T-%.0fm window for %s. Exiting cleanly.",
+            "No races requiring pre-jump analysis within T-%.0fm..T-%.0fm window for %s. Exiting cleanly.",
             WINDOW_MIN_MINUTES,
             WINDOW_MAX_MINUTES,
             date_str,
@@ -176,8 +188,11 @@ def run_pre_jump_analysis(date_str: str, dry_run: bool = False, force_all: bool 
         logger.info("Gemini batch status for %s: %s", meeting_name, ai_meta)
 
         now_iso = datetime.now(timezone.utc).isoformat()
+        mins_lookup = {r["race_id"]: r.get("_mins_to_jump") for r in pending_races}
         for live_ev in refreshed_races:
             pricing = price_and_generate_bets(live_ev)
+            m_to_jump = mins_lookup.get(live_ev["race_id"])
+            stage = "final" if (force_all or m_to_jump is None or m_to_jump <= FINAL_LOCK_THRESHOLD_MINUTES) else "early"
             update_doc = {
                 "status": live_ev["status"],
                 "track_condition": live_ev["track_condition"],
@@ -193,6 +208,7 @@ def run_pre_jump_analysis(date_str: str, dry_run: bool = False, force_all: bool 
                 "ai_model": live_ev.get("ai_model"),
                 "youtube_urls_used": yt_urls,
                 "pre_jump_analyzed": True,
+                "pre_jump_stage": stage,
                 "pre_jump_analyzed_at": now_iso,
                 "updated_at": now_iso,
             }

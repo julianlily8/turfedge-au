@@ -459,7 +459,43 @@ export function TabProfitability({ settlements, loading = false }: Props) {
                       {s.track_condition} · {s.distance_band} · {s.fluc_direction}
                     </td>
                     <td className="px-3 py-2.5">
-                      {s.win_all ? (
+                      {s.kind === 'quaddie' && s.quaddie ? (
+                        <div>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="font-mono text-xs font-bold text-emerald-300">
+                              {s.quaddie.display}
+                            </span>
+                            <span
+                              className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                                s.quaddie.won
+                                  ? 'bg-emerald-500/20 text-emerald-300'
+                                  : 'bg-rose-500/15 text-rose-300'
+                              }`}
+                            >
+                              {s.quaddie.won ? 'W' : 'L'}
+                            </span>
+                            {s.quaddie.legs_won !== undefined && (
+                              <span className="text-[10px] text-slate-400">
+                                ({s.quaddie.legs_won}/4 legs)
+                              </span>
+                            )}
+                          </div>
+                          {s.quaddie.legs && s.quaddie.legs.length > 0 && (
+                            <div className="mt-0.5 text-[10px] text-slate-400">
+                              {s.quaddie.legs
+                                .map(
+                                  (l) =>
+                                    `R${l.race_number}: ${
+                                      l.runner_names?.length
+                                        ? l.runner_names.join(', ')
+                                        : l.runner_numbers.map((n) => `#${n}`).join(', ')
+                                    }`
+                                )
+                                .join(' · ')}
+                            </div>
+                          )}
+                        </div>
+                      ) : s.win_all ? (
                         <div>
                           <span className="font-semibold text-slate-100">
                             #{s.win_all.runner_number} {s.win_all.runner_name}
@@ -483,13 +519,33 @@ export function TabProfitability({ settlements, loading = false }: Props) {
                       )}
                     </td>
                     <td className="px-3 py-2.5 text-right text-slate-300">
-                      {s.win_all ? `$${s.win_all.settled_odds.toFixed(2)}` : '—'}
-                      {s.win_all?.betfair_bsp ? (
-                        <div className="text-[10px] text-amber-300">BSP ${s.win_all.betfair_bsp.toFixed(2)}</div>
-                      ) : null}
+                      {s.kind === 'quaddie' && s.quaddie ? (
+                        <div>
+                          <div>{s.quaddie.dividend ? `$${s.quaddie.dividend.toFixed(2)}` : '—'}</div>
+                          <div className="text-[10px] text-slate-400">{s.quaddie.flexi_pct.toFixed(1)}% flexi</div>
+                        </div>
+                      ) : s.win_all ? (
+                        <>
+                          ${s.win_all.settled_odds.toFixed(2)}
+                          {s.win_all?.betfair_bsp ? (
+                            <div className="text-[10px] text-amber-300">BSP ${s.win_all.betfair_bsp.toFixed(2)}</div>
+                          ) : null}
+                        </>
+                      ) : (
+                        '—'
+                      )}
                     </td>
                     <td className="px-3 py-2.5 text-right">
-                      {s.win_all && !s.win_all.void ? (
+                      {s.kind === 'quaddie' && s.quaddie ? (
+                        <input
+                          type="number"
+                          step="1"
+                          placeholder={s.quaddie.dividend ? s.quaddie.dividend.toFixed(2) : 'Div'}
+                          value={overrides[overrideKey(s.settlement_id, 'quaddie')] ?? ''}
+                          onChange={(e) => updateOverride(s.settlement_id, 'quaddie', e.target.value)}
+                          className="w-20 rounded border border-slate-700 bg-slate-950 px-2 py-1 text-right text-xs text-slate-100 focus:border-emerald-500 focus:outline-none"
+                        />
+                      ) : s.win_all && !s.win_all.void ? (
                         <input
                           type="number"
                           step="0.05"

@@ -302,6 +302,14 @@ def settle_meeting_quaddie(
         "quaddie": {
             "category": "quaddie",
             "display": ticket["display"],
+            "legs": [
+                {
+                    "race_number": leg["race_number"],
+                    "runner_numbers": leg["runner_numbers"],
+                    "runner_names": leg.get("runner_names") or [],
+                }
+                for leg in legs
+            ],
             "combinations": ticket["combinations"],
             "flexi_pct": ticket["flexi_pct"],
             "legs_won": sum(1 for h in leg_hits if h),

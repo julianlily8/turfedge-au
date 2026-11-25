@@ -39,7 +39,9 @@ export async function fetchMeetingsByDate(dateStr: string): Promise<MeetingDoc[]
   if (!db) return [];
   const q = query(collection(db, 'meetings'), where('date', '==', dateStr));
   const snap = await getDocs(q);
-  return snap.docs.map((d) => d.data() as MeetingDoc);
+  return snap.docs
+    .map((d) => d.data() as MeetingDoc)
+    .sort((a, b) => (a.display_name || a.name || '').localeCompare(b.display_name || b.name || ''));
 }
 
 export async function fetchRacesByDate(dateStr: string): Promise<RaceDoc[]> {
@@ -49,7 +51,11 @@ export async function fetchRacesByDate(dateStr: string): Promise<RaceDoc[]> {
   const snap = await getDocs(q);
   return snap.docs
     .map((d) => d.data() as RaceDoc)
-    .sort((a, b) => a.meeting_name.localeCompare(b.meeting_name) || a.race_number - b.race_number);
+    .sort(
+      (a, b) =>
+        (a.meeting_name || '').localeCompare(b.meeting_name || '') ||
+        (a.race_number || 0) - (b.race_number || 0)
+    );
 }
 
 export async function fetchAvailableDates(): Promise<string[]> {

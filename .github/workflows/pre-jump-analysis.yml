@@ -1,9 +1,9 @@
-name: Pre-Jump Analysis & Gemini Batch (T-5..T-60m)
+name: Pre-Jump Analysis & Gemini Batch (T-2..T-120m)
 
 on:
   schedule:
     # Off-peak 15-minute schedule during Australian racing hours (approx 09:07 - 19:52 AEDT / 08:07 - 18:52 AEST).
-    # Job widens its scan window to T-5..T-60 minutes so cron jitter never skips a race.
+    # Job scans a widened T-2..T-120 minute window (with final lock at T-2..T-40m) so cron jitter never skips a race.
     - cron: '7,22,37,52 22-23 * * *'
     - cron: '7,22,37,52 0-9 * * *'
   workflow_dispatch:

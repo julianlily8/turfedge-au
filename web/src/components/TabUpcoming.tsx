@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ChevronDown,
   ChevronUp,
@@ -63,16 +63,22 @@ export function TabUpcoming({
   const [expandedRunner, setExpandedRunner] = useState<number | null>(null);
   const [showDropzone, setShowDropzone] = useState(false);
 
-  const filteredMeetings = useMemo(() => {
+  // Reset filters/selection cleanly whenever the user switches dates so all historical meetings show
+  useEffect(() => {
+    setTierFilter('All');
+    setSelectedMeetingSlug('');
+    setSelectedRaceId('');
+    setExpandedRunner(null);
+  }, [selectedDate]);
+
+  // Build unified list of ALL meetings for the selected date regardless of race status (Settled/Closed/Open)
+  const allMeetingsForDate = useMemo(() => {
     const map = new Map<string, MeetingDoc>();
     meetings.forEach((m) => {
-      if (tierFilter === 'All' || m.tier === tierFilter) {
-        map.set(m.meeting_slug, m);
-      }
+      if (m.meeting_slug) map.set(m.meeting_slug, m);
     });
-    // Ensure manual-uploaded races also appear as selectable meetings
     races.forEach((r) => {
-      if ((tierFilter === 'All' || r.tier === tierFilter) && !map.has(r.meeting_slug)) {
+      if (r.meeting_slug && !map.has(r.meeting_slug)) {
         map.set(r.meeting_slug, {
           meeting_slug: r.meeting_slug,
           date: r.date,
@@ -86,12 +92,27 @@ export function TabUpcoming({
           quaddie_races: [],
           weather: r.weather,
           meeting_bias: r.meeting_bias,
-          race_count: 1,
+          race_count: races.filter((x) => x.meeting_slug === r.meeting_slug).length,
         });
       }
     });
-    return Array.from(map.values()).sort((a, b) => a.display_name.localeCompare(b.display_name));
-  }, [meetings, races, tierFilter]);
+    return Array.from(map.values()).sort((a, b) =>
+      (a.display_name || a.name || '').localeCompare(b.display_name || b.name || '')
+    );
+  }, [meetings, races]);
+
+  const tierCounts = useMemo(
+    () => ({
+      All: allMeetingsForDate.length,
+      Metro: allMeetingsForDate.filter((m) => m.tier === 'Metro').length,
+      Provincial: allMeetingsForDate.filter((m) => m.tier === 'Provincial').length,
+    }),
+    [allMeetingsForDate]
+  );
+
+  const filteredMeetings = useMemo(() => {
+    return allMeetingsForDate.filter((m) => tierFilter === 'All' || m.tier === tierFilter);
+  }, [allMeetingsForDate, tierFilter]);
 
   const activeMeeting = useMemo(() => {
     return (
@@ -142,7 +163,7 @@ export function TabUpcoming({
                   tierFilter === t ? 'bg-emerald-500 text-slate-950' : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
-                {t}
+                {t} <span className="opacity-75">({tierCounts[t]})</span>
               </button>
             ))}
           </div>
@@ -176,6 +197,37 @@ export function TabUpcoming({
           {showDropzone ? 'Hide Manual CSV/JSON' : 'Manual CSV/JSON Fallback'}
         </button>
       </div>
+
+      {/* Clickable Meeting Pills for All Meetings on Selected Date */}
+      {filteredMeetings.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          {filteredMeetings.map((m) => {
+            const isSelected = activeMeeting?.meeting_slug === m.meeting_slug;
+            const rCount = races.filter((r) => r.meeting_slug === m.meeting_slug).length || m.race_count || 0;
+            return (
+              <button
+                key={m.meeting_slug}
+                type="button"
+                onClick={() => {
+                  setSelectedMeetingSlug(m.meeting_slug);
+                  setSelectedRaceId('');
+                  setExpandedRunner(null);
+                }}
+                className={`inline-flex items-center gap-2 rounded-xl border px-3 py-1.5 text-xs font-semibold transition ${
+                  isSelected
+                    ? 'border-emerald-500 bg-emerald-500/15 text-emerald-200'
+                    : 'border-slate-800 bg-slate-900/60 text-slate-300 hover:border-slate-700 hover:text-white'
+                }`}
+              >
+                <span>{m.display_name}</span>
+                <span className="text-[10px] font-normal text-slate-400">
+                  {m.state} · {m.tier} · {rCount}R
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {showDropzone && (
         <ManualDropzone
@@ -215,8 +267,10 @@ export function TabUpcoming({
                     VALUE
                   </span>
                 )}
-                {r.settled && (
-                  <span className="rounded bg-slate-700 px-1.5 py-0.5 text-[10px] text-slate-300">FINAL</span>
+                {(r.settled || ['final', 'settled', 'closed'].includes((r.status || '').toLowerCase())) && (
+                  <span className="rounded bg-slate-700 px-1.5 py-0.5 text-[10px] uppercase text-slate-300">
+                    {r.settled ? 'SETTLED' : r.status}
+                  </span>
                 )}
               </button>
             );
@@ -275,6 +329,17 @@ export function TabUpcoming({
                 <p className="mt-2 rounded-lg bg-slate-950/70 px-3 py-2 text-xs text-slate-300">
                   <strong className="text-sky-300">Gemini Synthesis:</strong> {activeRace.ai_summary}
                 </p>
+              )}
+              {activeRace.results && activeRace.results.length > 0 && (
+                <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-emerald-500/25 bg-emerald-950/20 px-3 py-2 text-xs">
+                  <span className="font-bold text-emerald-300">Official Result:</span>
+                  {activeRace.results.slice(0, 4).map((res) => (
+                    <span key={res.position} className="rounded bg-slate-900/90 px-2 py-0.5 text-slate-200 tabular-nums">
+                      <strong>{res.position === 1 ? '1st' : res.position === 2 ? '2nd' : res.position === 3 ? '3rd' : '4th'}</strong>{' '}
+                      #{res.runner_number} {res.name}
+                    </span>
+                  ))}
+                </div>
               )}
             </div>
 

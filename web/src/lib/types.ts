@@ -217,7 +217,9 @@ export interface RaceDoc {
   results?: RaceResultEntry[];
   ai_summary?: string;
   ai_model?: string | null;
+  baseline_analyzed?: boolean;
   pre_jump_analyzed?: boolean;
+  pre_jump_stage?: string | null;
   settled?: boolean;
   is_manual_upload?: boolean;
 }
@@ -265,6 +267,11 @@ export interface SettledSrmBet {
 export interface SettledExoticBet {
   category: string;
   display: string;
+  legs?: {
+    race_number: number;
+    runner_numbers: number[];
+    runner_names?: string[];
+  }[];
   combinations: number;
   flexi_pct: number;
   legs_won?: number;

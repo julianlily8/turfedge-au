@@ -301,7 +301,8 @@ export function computeProfitability(
     );
   const overall = toMetrics('overall', { label: 'Selected Portfolios Combined', ...overallTotals });
 
-  // Strict delta threshold: delta >= +0.5 -> Boost Weight, -0.5 < delta < +0.5 -> Keep, delta <= -0.5 -> Trim Weight
+  // Strict delta threshold + 100-win minimum sample-size guard:
+  // Force 'Low Sample' whenever total settled wins < 100 so small-sample noise never shows Boost/Keep/Trim.
   const factorDiagnostics: FactorDiagnostic[] = FACTOR_DEFINITIONS.map((f) => {
     const st = factorStats[f.key];
     const sampleCount = st.winScores.length + st.lossScores.length;
@@ -311,8 +312,8 @@ export function computeProfitability(
     const highScorePotPct =
       st.highStaked > 0 ? Math.round(((st.highRet - st.highStaked) / st.highStaked) * 1000) / 10 : null;
 
-    let recommendation: FactorDiagnostic['recommendation'] = 'Keep';
-    if (st.winScores.length === 0 || st.lossScores.length === 0) {
+    let recommendation: FactorDiagnostic['recommendation'] = 'Low Sample';
+    if (totalWinCount < MIN_SAMPLE_WINS_FOR_TUNING || st.winScores.length === 0 || st.lossScores.length === 0) {
       recommendation = 'Low Sample';
     } else if (edgeDelta >= 0.5) {
       recommendation = 'Boost Weight';

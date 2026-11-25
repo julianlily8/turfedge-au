@@ -88,9 +88,9 @@ def run_settlement_for_date(date_str: str, store: FirestoreStore, http: PoliteHt
         already_settled = bool(race.get("settled")) or (status_lower == "settled")
         existing_settlement = race.get("settlement") or {}
 
-        # Strict POT% Integrity Gate: ONLY settle races that completed T-25m pre-jump analysis!
-        # Remove any stale pre-deploy baseline settlements so baseline runs never pollute live model POT%.
-        if not race.get("pre_jump_analyzed"):
+        # Settle any race that completed pre-jump analysis OR morning Gemini baseline analysis
+        # so GitHub cron jitter never skips a race or breaks a meeting's Quaddie.
+        if not (race.get("pre_jump_analyzed") or race.get("baseline_analyzed")):
             if already_settled:
                 store.delete_doc("settlements", race["race_id"])
                 store.set_doc(
@@ -183,8 +183,8 @@ def run_settlement_for_date(date_str: str, store: FirestoreStore, http: PoliteHt
 
         settled_m_races = [r for r in m_races if r.get("results")]
         meeting_bias = compute_meeting_bias(settled_m_races)
-        # Only settle quaddie if all 4 legs completed pre-jump analysis
-        analyzed_m_races = [r for r in m_races if r.get("pre_jump_analyzed")]
+        # Include any leg that completed pre-jump OR morning Gemini baseline analysis
+        analyzed_m_races = [r for r in m_races if r.get("pre_jump_analyzed") or r.get("baseline_analyzed")]
         quaddie_settlement = settle_meeting_quaddie(meeting, analyzed_m_races)
 
         update_m: Dict[str, Any] = {
