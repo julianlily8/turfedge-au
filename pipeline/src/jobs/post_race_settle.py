@@ -12,6 +12,7 @@ from pipeline.src.engine.scorer_23pt import compute_meeting_bias
 from pipeline.src.engine.settlement import settle_meeting_quaddie, settle_race
 from pipeline.src.firestore_client import FirestoreStore
 from pipeline.src.http_client import PoliteHttpClient
+from pipeline.src.jobs.pre_jump_analyze import parse_utc_timestamp
 from pipeline.src.sources.betfair_bsp import BetfairBspSource
 from pipeline.src.sources.ladbrokes import LadbrokesSource
 
@@ -24,13 +25,10 @@ SYDNEY_TZ = ZoneInfo("Australia/Sydney")
 def _race_has_jumped(advertised_start: str, now_utc: datetime) -> bool:
     if not advertised_start:
         return True
-    try:
-        dt = datetime.fromisoformat(advertised_start.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return now_utc >= (dt + timedelta(minutes=3))
-    except Exception:
+    dt = parse_utc_timestamp(advertised_start)
+    if dt is None:
         return True
+    return now_utc >= (dt + timedelta(minutes=3))
 
 
 def run_settlement_for_date(date_str: str, store: FirestoreStore, http: PoliteHttpClient) -> None:

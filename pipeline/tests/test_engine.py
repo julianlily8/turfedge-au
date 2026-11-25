@@ -183,3 +183,24 @@ def test_settlement_math_and_srm_haircut():
     assert settled["first4"]["won"] is True
     assert all(s["won"] is True for s in settled["srm"])
     assert all(s["haircut_factor"] == 0.75 for s in settled["srm"])
+
+
+def test_go_timestamp_parsing_and_betfair_403_resilience():
+    from datetime import datetime, timezone
+    import requests
+    from pipeline.src.jobs.pre_jump_analyze import _minutes_until_jump
+    from pipeline.src.jobs.post_race_settle import _race_has_jumped
+    from pipeline.src.sources.betfair_bsp import BetfairBspSource
+
+    now = datetime(2026, 11, 25, 3, 40, 0, tzinfo=timezone.utc)
+    # Ladbrokes Go-formatted UTC string
+    mins = _minutes_until_jump("2026-11-25 04:05:00 +0000 UTC", now)
+    assert mins == 25.0
+    assert _race_has_jumped("2026-11-25 03:30:00 +0000 UTC", now) is True
+    assert _race_has_jumped("2026-11-25 04:05:00 +0000 UTC", now) is False
+
+    # Betfair 403 Forbidden (unpublished CSV or geo-block) must degrade gracefully to {}
+    mock_http = MagicMock()
+    mock_http.get_text.side_effect = requests.HTTPError("403 Client Error: Forbidden")
+    bf = BetfairBspSource(mock_http)
+    assert bf.fetch_daily_bsp("2026-11-25") == {}

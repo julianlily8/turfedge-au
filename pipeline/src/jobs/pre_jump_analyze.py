@@ -26,16 +26,37 @@ WINDOW_MIN_MINUTES = 5.0
 WINDOW_MAX_MINUTES = 60.0
 
 
-def _minutes_until_jump(advertised_start: str, now_utc: datetime) -> Optional[float]:
-    if not advertised_start:
+def parse_utc_timestamp(ts: str) -> Optional[datetime]:
+    """Parse ISO-8601 ('...Z') and Go-formatted ('2026-11-25 03:55:00 +0000 UTC') timestamps."""
+    raw = (ts or "").strip()
+    if not raw:
         return None
+    # Strip trailing ' UTC' emitted by Ladbrokes Go time.Time.String()
+    if raw.endswith(" UTC"):
+        raw = raw[:-4].strip()
     try:
-        dt = datetime.fromisoformat(advertised_start.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        return (dt - now_utc).total_seconds() / 60.0
+        return dt.astimezone(timezone.utc)
     except Exception:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S %z", "%Y-%m-%d %H:%M:%S"):
+        try:
+            dt = datetime.strptime(raw, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            continue
+    return None
+
+
+def _minutes_until_jump(advertised_start: str, now_utc: datetime) -> Optional[float]:
+    dt = parse_utc_timestamp(advertised_start)
+    if dt is None:
         return None
+    return (dt - now_utc).total_seconds() / 60.0
 
 
 def run_pre_jump_analysis(date_str: str, dry_run: bool = False, force_all: bool = False) -> None:

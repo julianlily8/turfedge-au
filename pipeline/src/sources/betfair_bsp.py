@@ -40,8 +40,17 @@ class BetfairBspSource:
         place_url = f"{BETFAIR_BSP_BASE}/dwbfpricesausplace{ddmmyyyy}.csv"
 
         lookup: Dict[str, Dict[str, Any]] = {}
+        bf_headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Accept": "text/csv,text/plain,*/*",
+        }
 
-        win_csv = self.http.get_text(win_url, allow_404=True)
+        win_csv = None
+        try:
+            win_csv = self.http.get_text(win_url, headers=bf_headers, allow_404=True)
+        except Exception as exc:
+            logger.info("Betfair Win BSP CSV unavailable/unpublished for %s (%s): %s", date_str, win_url, exc)
+
         if win_csv:
             for row in csv.DictReader(io.StringIO(win_csv)):
                 sel_name = normalize_horse_name(row.get("selection_name") or "")
@@ -66,7 +75,12 @@ class BetfairBspSource:
         else:
             logger.info("Betfair Win BSP CSV not yet published for %s (%s)", date_str, win_url)
 
-        place_csv = self.http.get_text(place_url, allow_404=True)
+        place_csv = None
+        try:
+            place_csv = self.http.get_text(place_url, headers=bf_headers, allow_404=True)
+        except Exception as exc:
+            logger.info("Betfair Place BSP CSV unavailable/unpublished for %s (%s): %s", date_str, place_url, exc)
+
         if place_csv:
             place_hits = 0
             for row in csv.DictReader(io.StringIO(place_csv)):

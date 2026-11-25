@@ -91,7 +91,9 @@ class FirestoreStore:
                     results.append(doc)
             return results
 
-        docs = self.db.collection(collection).where(field, "==", value).stream()
+        from google.cloud.firestore_v1.base_query import FieldFilter
+
+        docs = self.db.collection(collection).where(filter=FieldFilter(field, "==", value)).stream()
         results = []
         for snap in docs:
             d = snap.to_dict() or {}
