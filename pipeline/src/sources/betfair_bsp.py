@@ -4,8 +4,8 @@ import csv
 import io
 import logging
 import re
-from datetime import datetime
-from typing import Any, Dict, Optional
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
 
 from pipeline.src.http_client import PoliteHttpClient
 
@@ -29,15 +29,23 @@ class BetfairBspSource:
     def __init__(self, http: PoliteHttpClient) -> None:
         self.http = http
 
+    @staticmethod
+    def _expected_menu_date_tokens(dt: datetime) -> List[str]:
+        """Return day/month tokens that appear in Betfair menu_hint (e.g. '25th Nov')."""
+        day = dt.day
+        suffix = "th" if 11 <= day <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+        mon = dt.strftime("%b")
+        return [f"{day}{suffix} {mon}".lower(), f"{day} {mon}".lower()]
+
     def fetch_daily_bsp(self, date_str: str) -> Dict[str, Dict[str, Any]]:
         """
         Return lookup map keyed by normalized horse name -> {win_bsp, place_bsp, win_lose, ppwap, menu_hint}.
-        Betfair filenames use DDMMYYYY (e.g. dwbfpricesauswin24112026.csv).
+        Betfair names daily AU promo CSVs by UTC publish date (typically race_date + 1 day, e.g.
+        dwbfpricesauswin26112026.csv holds '25th Nov' AU races). Check race_date+1 first, then race_date.
         """
         dt = datetime.strptime(date_str, "%Y-%m-%d")
-        ddmmyyyy = dt.strftime("%d%m%Y")
-        win_url = f"{BETFAIR_BSP_BASE}/dwbfpricesauswin{ddmmyyyy}.csv"
-        place_url = f"{BETFAIR_BSP_BASE}/dwbfpricesausplace{ddmmyyyy}.csv"
+        expected_tokens = self._expected_menu_date_tokens(dt)
+        candidate_dates = [dt + timedelta(days=1), dt]
 
         lookup: Dict[str, Dict[str, Any]] = {}
         bf_headers = {
@@ -45,13 +53,26 @@ class BetfairBspSource:
             "Accept": "text/csv,text/plain,*/*",
         }
 
+        matched_ddmmyyyy: Optional[str] = None
         win_csv = None
-        try:
-            win_csv = self.http.get_text(win_url, headers=bf_headers, allow_404=True)
-        except Exception as exc:
-            logger.info("Betfair Win BSP CSV unavailable/unpublished for %s (%s): %s", date_str, win_url, exc)
+        for cand_dt in candidate_dates:
+            ddmmyyyy = cand_dt.strftime("%d%m%Y")
+            win_url = f"{BETFAIR_BSP_BASE}/dwbfpricesauswin{ddmmyyyy}.csv"
+            try:
+                text = self.http.get_text(win_url, headers=bf_headers, allow_404=True)
+            except Exception as exc:
+                logger.info("Betfair Win BSP CSV unavailable/unpublished for %s (%s): %s", date_str, win_url, exc)
+                continue
+            if not text:
+                continue
+            # Verify the CSV actually contains rows for date_str (e.g. "25th Nov")
+            lower_sample = text[:8000].lower()
+            if any(tok in lower_sample for tok in expected_tokens) or cand_dt == candidate_dates[-1]:
+                win_csv = text
+                matched_ddmmyyyy = ddmmyyyy
+                break
 
-        if win_csv:
+        if win_csv and matched_ddmmyyyy:
             for row in csv.DictReader(io.StringIO(win_csv)):
                 sel_name = normalize_horse_name(row.get("selection_name") or "")
                 if not sel_name:
@@ -71,11 +92,13 @@ class BetfairBspSource:
                     "ppwap": round(float(row.get("ppwap") or 0), 2) if row.get("ppwap") else None,
                     "place_bsp": None,
                 }
-            logger.info("Loaded %d Betfair Win BSP records for %s", len(lookup), date_str)
+            logger.info("Loaded %d Betfair Win BSP records for %s (file %s)", len(lookup), date_str, matched_ddmmyyyy)
         else:
-            logger.info("Betfair Win BSP CSV not yet published for %s (%s)", date_str, win_url)
+            logger.info("Betfair Win BSP CSV not yet published/accessible for %s", date_str)
 
         place_csv = None
+        place_ddmmyyyy = matched_ddmmyyyy or (dt + timedelta(days=1)).strftime("%d%m%Y")
+        place_url = f"{BETFAIR_BSP_BASE}/dwbfpricesausplace{place_ddmmyyyy}.csv"
         try:
             place_csv = self.http.get_text(place_url, headers=bf_headers, allow_404=True)
         except Exception as exc:
