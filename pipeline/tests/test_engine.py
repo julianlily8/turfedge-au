@@ -340,3 +340,28 @@ def test_youtube_xml_feed_discovery_and_runner_snippet_extraction():
     snippet = extract_runner_relevant_snippets(long_transcript, ["Harbour Sovereign"], max_total_chars=400)
     assert "Harbour Sovereign" in snippet
     assert len(snippet) <= 400
+
+    # Strict upper_bound_utc cutoff must exclude videos published after Race 1 cutoff
+    from pipeline.src.jobs.rebuild_date_blind import scrub_event_blind
+
+    cutoff = datetime(2026, 11, 25, 1, 0, 0, tzinfo=timezone.utc)
+    pre_cutoff = parse_youtube_atom_feed(sample_xml, "Racing.com", lookback_hours=60, upper_bound_utc=cutoff)
+    assert pre_cutoff == []  # All entries in sample_xml were after 2026-11-25T01:00:00Z or >60h old
+
+    dirty_ev = {
+        "status": "Final",
+        "results": [{"position": 1, "runner_number": 1}],
+        "dividends": {"exacta": 12.5},
+        "race_comment": "Runner 1 won easily.",
+        "runners": [
+            {"runner_number": 1, "name": "Test Horse", "finishing_position": 1, "margin": 0.0, "form_comment": "Won by 2L"}
+        ],
+    }
+    clean = scrub_event_blind(dirty_ev)
+    assert clean["status"] == "Open"
+    assert clean["results"] == []
+    assert clean["dividends"] == {}
+    assert clean["race_comment"] == ""
+    assert "finishing_position" not in clean["runners"][0]
+    assert "margin" not in clean["runners"][0]
+    assert clean["runners"][0]["form_comment"] == ""

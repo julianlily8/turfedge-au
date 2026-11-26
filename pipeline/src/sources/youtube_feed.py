@@ -31,13 +31,18 @@ def parse_youtube_atom_feed(
     channel_name: str,
     now_utc: Optional[datetime] = None,
     lookback_hours: float = 36.0,
+    upper_bound_utc: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
-    """Parse YouTube public Atom XML feed and return entries published within lookback_hours."""
+    """
+    Parse YouTube public Atom XML feed and return entries published within lookback_hours.
+    When upper_bound_utc is supplied (e.g., blind historical replay), strictly excludes any
+    video published at or after upper_bound_utc so post-race wraps cannot leak results.
+    """
     if not xml_text or not xml_text.strip():
         return []
 
-    now_utc = now_utc or datetime.now(timezone.utc)
-    cutoff = now_utc - timedelta(hours=lookback_hours)
+    anchor_utc = upper_bound_utc or now_utc or datetime.now(timezone.utc)
+    cutoff = anchor_utc - timedelta(hours=lookback_hours)
 
     try:
         root = ET.fromstring(xml_text)
@@ -69,6 +74,9 @@ def parse_youtube_atom_feed(
 
         if published_dt is not None and published_dt < cutoff:
             continue
+        if upper_bound_utc is not None:
+            if published_dt is None or published_dt >= upper_bound_utc:
+                continue
 
         videos.append(
             {
@@ -179,9 +187,14 @@ class YouTubeFeedDiscovery:
         self.http = http
         self.cfg = load_youtube_channels_config()
 
-    def fetch_recent_channel_videos(self, now_utc: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    def fetch_recent_channel_videos(
+        self,
+        now_utc: Optional[datetime] = None,
+        lookback_hours: Optional[float] = None,
+        upper_bound_utc: Optional[datetime] = None,
+    ) -> List[Dict[str, Any]]:
         channels = self.cfg.get("channels") or []
-        lookback = float(self.cfg.get("lookback_hours", 36))
+        lookback = float(lookback_hours if lookback_hours is not None else self.cfg.get("lookback_hours", 36))
         all_videos: List[Dict[str, Any]] = []
 
         for ch in channels:
@@ -197,9 +210,15 @@ class YouTubeFeedDiscovery:
                     allow_404=True,
                 )
                 if xml_text:
-                    vids = parse_youtube_atom_feed(xml_text, cname, now_utc=now_utc, lookback_hours=lookback)
+                    vids = parse_youtube_atom_feed(
+                        xml_text,
+                        cname,
+                        now_utc=now_utc,
+                        lookback_hours=lookback,
+                        upper_bound_utc=upper_bound_utc,
+                    )
                     all_videos.extend(vids)
-                    logger.info("YouTube XML feed [%s]: %d recent video(s) within %.0fh", cname, len(vids), lookback)
+                    logger.info("YouTube XML feed [%s]: %d video(s) within %.0fh window", cname, len(vids), lookback)
             except Exception as exc:
                 logger.warning("Could not fetch YouTube XML feed for %s (%s): %s", cname, cid, exc)
 

@@ -1,0 +1,50 @@
+name: Manual Blind Two-Phase Date Rebuild
+
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Date to cleanly wipe & rebuild in strict two-phase blind mode (YYYY-MM-DD)'
+        required: true
+        default: '2026-11-25'
+      yt_cutoff_utc:
+        description: 'Strict UTC upper bound for YouTube preview videos (e.g. 2026-11-25T01:00:00Z)'
+        required: true
+        default: '2026-11-25T01:00:00Z'
+      yt_lookback_hours:
+        description: 'YouTube lookback hours before yt_cutoff_utc'
+        required: false
+        default: '60'
+
+concurrency:
+  group: rebuild-date-blind
+  cancel-in-progress: false
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: pipeline/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r pipeline/requirements.txt
+
+      - name: Run Blind Two-Phase Rebuild
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          LADBROKES_FROM_EMAIL: ${{ secrets.LADBROKES_FROM_EMAIL }}
+          TARGET_DATE: ${{ github.event.inputs.date }}
+          YT_CUTOFF_UTC: ${{ github.event.inputs.yt_cutoff_utc }}
+          YT_LOOKBACK_HOURS: ${{ github.event.inputs.yt_lookback_hours }}
+        run: python -m pipeline.src.jobs.rebuild_date_blind
