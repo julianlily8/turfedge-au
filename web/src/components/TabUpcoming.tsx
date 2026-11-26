@@ -543,7 +543,7 @@ export function TabUpcoming({
                             </span>
                           </div>
                           <p className="mt-1 text-[11px] text-slate-500">
-                            {ex.skip_reason || 'Skipped: Projected return below $12.50 minimum.'}
+                            {ex.skip_reason || 'Skipped: Projected return below minimum threshold.'}
                           </p>
                         </div>
                       );

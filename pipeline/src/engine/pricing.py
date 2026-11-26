@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import statistics
 from typing import Any, Dict, List, Optional
 
 from pipeline.src.engine.scorer_23pt import load_factor_weights
@@ -13,15 +14,23 @@ MIN_SRM_ODDS = 1.80
 UNIT_STAKE = 10.0
 SHORT_FAV_ODDS_THRESHOLD = 2.30
 TAB_EXOTIC_POOL_FACTOR = 0.79
-MIN_EXOTIC_PROJECTED_RETURN = 12.50
 
-# Two-tier market ceiling for $31+ outsiders
+# Tiered minimum anchor return floors by exotic type (field-size mins remain 6 / 7 / 8)
+MIN_EXOTIC_RETURN = {
+    "exacta": 12.50,
+    "trifecta": 10.00,
+    "first4": 8.00,
+}
+MIN_EXOTIC_PROJECTED_RETURN = MIN_EXOTIC_RETURN["exacta"]
+
+# Two-tier market ceiling for $31+ outsiders (relative-to-field threshold for compressed maidens)
 OUTSIDER_ODDS_THRESHOLD = 31.0
 OUTSIDER_TIER1_MAX_MULT = 2.5
 OUTSIDER_TIER2_MAX_MULT = 8.5
 OUTSIDER_TIER1_FLUC_CUTOFF = 25.0
 OUTSIDER_TIER2_MIN_FLUC_PCT = 30.0
-OUTSIDER_MIN_COMPOSITE = 55.0
+OUTSIDER_MIN_COMPOSITE_FLOOR = 53.5
+OUTSIDER_FIELD_MEDIAN_OFFSET = 1.0
 OUTSIDER_TIER2_MIN_RATED_PRICE = 10.00
 
 MIN_EXOTIC_RUNNERS = {
@@ -129,7 +138,11 @@ def price_and_generate_bets(race: Dict[str, Any], weights_cfg: Optional[Dict[str
 
     # Blend 70% 23-point model softmax with 30% normalized market implied probability (when odds exist)
     # so rated prices stay calibrated to Australian market liquidity while still exposing genuine overlays.
-    model_probs = _softmax_probabilities([float(r["composite_score"]) for r in runners], temperature=temp)
+    composites = [float(r["composite_score"]) for r in runners]
+    field_median_composite = statistics.median(composites)
+    tier2_comp_threshold = max(OUTSIDER_MIN_COMPOSITE_FLOOR, field_median_composite + OUTSIDER_FIELD_MEDIAN_OFFSET)
+
+    model_probs = _softmax_probabilities(composites, temperature=temp)
     raw_mkt = [1.0 / float(r["live_win"]) if float(r.get("live_win") or 0) > 1.0 else 0.0 for r in runners]
     mkt_sum = sum(raw_mkt)
 
@@ -137,19 +150,19 @@ def price_and_generate_bets(race: Dict[str, Any], weights_cfg: Optional[Dict[str
         mkt_probs = [p / mkt_sum for p in raw_mkt]
         blended = [0.72 * mp + 0.28 * kp for mp, kp in zip(model_probs, mkt_probs)]
 
-        # Two-tier market ceiling for $31+ outsiders:
-        # - Tier 1 (fluc < +25% OR composite < 55.0): cap at 2.5x market-implied probability
-        # - Tier 2 (fluc >= +30% AND composite >= 55.0): allow up to 8.5x market-implied prob with $10.00 Rated Price floor
-        # - Transition (+25% <= fluc < +30% AND composite >= 55.0): cap at 4.0x market-implied probability
+        # Two-tier market ceiling for $31+ outsiders (relative-to-field threshold):
+        # - Tier 2 (fluc >= +30% AND composite >= max(53.5, field_median + 1.0)): up to 8.5x mkt prob + $10.00 floor
+        # - Tier 1 (fluc < +25% OR composite < threshold): cap at 2.5x market-implied probability
+        # - Transition (+25% <= fluc < +30% AND composite >= threshold): cap at 4.0x market-implied probability
         caps: List[Optional[float]] = []
         for r, kp in zip(runners, mkt_probs):
             lv = float(r.get("live_win") or 0.0)
             fluc_pct = float((r.get("market_fluc") or {}).get("fluc_pct") or 0.0)
             comp = float(r.get("composite_score") or 0.0)
             if lv >= OUTSIDER_ODDS_THRESHOLD and kp > 0.0:
-                if fluc_pct >= OUTSIDER_TIER2_MIN_FLUC_PCT and comp >= OUTSIDER_MIN_COMPOSITE:
+                if fluc_pct >= OUTSIDER_TIER2_MIN_FLUC_PCT and comp >= tier2_comp_threshold:
                     caps.append(min(OUTSIDER_TIER2_MAX_MULT * kp, 1.0 / OUTSIDER_TIER2_MIN_RATED_PRICE))
-                elif fluc_pct < OUTSIDER_TIER1_FLUC_CUTOFF or comp < OUTSIDER_MIN_COMPOSITE:
+                elif fluc_pct < OUTSIDER_TIER1_FLUC_CUTOFF or comp < tier2_comp_threshold:
                     caps.append(OUTSIDER_TIER1_MAX_MULT * kp)
                 else:
                     caps.append(min(4.0 * kp, 1.0 / OUTSIDER_TIER2_MIN_RATED_PRICE))
@@ -193,7 +206,7 @@ def price_and_generate_bets(race: Dict[str, Any], weights_cfg: Optional[Dict[str
         if (
             lv_check >= OUTSIDER_ODDS_THRESHOLD
             and fluc_check >= OUTSIDER_TIER2_MIN_FLUC_PCT
-            and comp_check >= OUTSIDER_MIN_COMPOSITE
+            and comp_check >= tier2_comp_threshold
         ):
             rated_price = max(OUTSIDER_TIER2_MIN_RATED_PRICE, rated_price)
         live_win = round(float(r.get("live_win") or 0.0), 2)
@@ -452,7 +465,8 @@ def _build_single_exotic(
     est_anchor_return = round(est_anchor_div * (UNIT_STAKE / max(combos_count, 1)), 2)
     flexi_pct = round((UNIT_STAKE / max(combos_count, 1)) * 100.0, 2)
 
-    if est_anchor_return < MIN_EXOTIC_PROJECTED_RETURN:
+    min_return = MIN_EXOTIC_RETURN[ex_key]
+    if est_anchor_return < min_return:
         fav_tag = "short fav / " if is_short_fav else ""
         return {
             "type": label,
@@ -466,7 +480,7 @@ def _build_single_exotic(
             "est_anchor_return": est_anchor_return,
             "skipped": True,
             "skip_reason": (
-                f"Skipped: Est. return ${est_anchor_return:.2f} < ${MIN_EXOTIC_PROJECTED_RETURN:.2f} min "
+                f"Skipped: Est. return ${est_anchor_return:.2f} < ${min_return:.2f} min "
                 f"({fav_tag}{combos_count} combos)"
             ),
         }

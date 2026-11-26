@@ -715,7 +715,7 @@ def test_srm_min_odds_gate_picnic_margin_bayesian_and_two_tier_outsider_ceiling(
             {"runner_number": 3, "name": "Mid Chance", "barrier": 3, "jockey": "J3", "trainer": "T3", "composite_score": 54.0, "opening_win": 7.0, "live_win": 7.0, "market_fluc": {"direction": "Steady", "fluc_pct": 0.0}},
             {"runner_number": 5, "name": "Fourth Chance", "barrier": 5, "jockey": "J5", "trainer": "T5", "composite_score": 53.0, "opening_win": 10.0, "live_win": 10.0, "market_fluc": {"direction": "Steady", "fluc_pct": 0.0}},
             {"runner_number": 4, "name": "Fulhamzedge", "barrier": 4, "jockey": "J4", "trainer": "T4", "composite_score": 58.0, "opening_win": 67.0, "live_win": 61.0, "market_fluc": {"direction": "Firmer", "fluc_pct": 9.8}},
-            {"runner_number": 8, "name": "Just Jean", "barrier": 8, "jockey": "J8", "trainer": "T8", "composite_score": 56.5, "opening_win": 126.0, "live_win": 91.0, "market_fluc": {"direction": "Firmer", "fluc_pct": 38.5}},
+            {"runner_number": 8, "name": "Just Jean", "barrier": 8, "jockey": "J8", "trainer": "T8", "composite_score": 57.6, "opening_win": 126.0, "live_win": 91.0, "market_fluc": {"direction": "Firmer", "fluc_pct": 38.5}},
             {"runner_number": 6, "name": "No Hope", "barrier": 6, "jockey": "J6", "trainer": "T6", "composite_score": 48.0, "opening_win": 51.0, "live_win": 51.0, "market_fluc": {"direction": "Steady", "fluc_pct": 0.0}},
         ],
     }
@@ -877,3 +877,60 @@ def test_24pt_weights_jockey_split_and_srm_field_size_precedence():
     settled5 = settle_race(five_runner_race, results5, {"best_tote_win": {"1": 3.5}})
     settled5_legs = {s["leg_count"] for s in settled5["srm"]}
     assert 3 not in settled5_legs and 4 not in settled5_legs
+
+
+def test_relative_tier2_maiden_threshold_and_tiered_exotic_return_floors():
+    from pipeline.src.engine.pricing import MIN_EXOTIC_RETURN, _build_single_exotic
+
+    # 1) Relative-to-field Tier-2 threshold in a compressed maiden field (median ~52.5 -> threshold max(53.5, 53.5) = 53.5)
+    maiden_race = {
+        "race_id": "maiden-compressed",
+        "scored_runners": [
+            {"runner_number": 1, "name": "Fav A", "barrier": 1, "jockey": "J1", "trainer": "T1", "composite_score": 55.8, "opening_win": 3.0, "live_win": 2.6, "market_fluc": {"direction": "Firmer", "fluc_pct": 15.4}},
+            {"runner_number": 2, "name": "Sec B", "barrier": 2, "jockey": "J2", "trainer": "T2", "composite_score": 53.2, "opening_win": 3.5, "live_win": 3.2, "market_fluc": {"direction": "Firmer", "fluc_pct": 9.4}},
+            {"runner_number": 3, "name": "Mid C", "barrier": 3, "jockey": "J3", "trainer": "T3", "composite_score": 52.6, "opening_win": 6.0, "live_win": 6.5, "market_fluc": {"direction": "Drifter", "fluc_pct": -7.7}},
+            {"runner_number": 4, "name": "Mid D", "barrier": 4, "jockey": "J4", "trainer": "T4", "composite_score": 52.4, "opening_win": 9.0, "live_win": 10.0, "market_fluc": {"direction": "Drifter", "fluc_pct": -10.0}},
+            # Sharp $91 firmer with 54.2 composite (< old 55.0 cliff, but >= max(53.5, 52.5+1.0) = 53.5!) -> qualifies for Tier 2 (8.5x, >=$10 floor)
+            {"runner_number": 8, "name": "Maiden Firmer", "barrier": 8, "jockey": "J8", "trainer": "T8", "composite_score": 54.2, "opening_win": 126.0, "live_win": 91.0, "market_fluc": {"direction": "Firmer", "fluc_pct": 38.5}},
+            # Non-firming $61 outsider with same 54.2 composite (fluc +8.0% < +25%) -> stays capped at Tier 1 (2.5x)
+            {"runner_number": 6, "name": "Maiden NonFirmer", "barrier": 6, "jockey": "J6", "trainer": "T6", "composite_score": 54.2, "opening_win": 67.0, "live_win": 61.0, "market_fluc": {"direction": "Firmer", "fluc_pct": 9.8}},
+            # Below-threshold $91 firmer (53.0 < 53.5) -> stays capped at Tier 1 (2.5x)
+            {"runner_number": 7, "name": "Weak Firmer", "barrier": 7, "jockey": "J7", "trainer": "T7", "composite_score": 53.0, "opening_win": 126.0, "live_win": 91.0, "market_fluc": {"direction": "Firmer", "fluc_pct": 38.5}},
+            {"runner_number": 5, "name": "Tail E", "barrier": 5, "jockey": "J5", "trainer": "T5", "composite_score": 50.5, "opening_win": 21.0, "live_win": 26.0, "market_fluc": {"direction": "Drifter", "fluc_pct": -19.2}},
+        ],
+    }
+    price_and_generate_bets(maiden_race)
+    by_num = {r["runner_number"]: r for r in maiden_race["scored_runners"]}
+    # Runner 8 qualified for Tier 2 (8.5x allowance) despite composite 54.2 < 55.0
+    assert by_num[8]["rated_price"] >= 10.00
+    assert by_num[8]["probabilities"]["win"] > by_num[6]["probabilities"]["win"] * 1.5
+    assert by_num[8]["probabilities"]["win"] > by_num[7]["probabilities"]["win"] * 2.0
+
+    # 2) Tiered exotic minimum anchor return gates ($12.50 Exacta / $10.00 Trifecta / $8.00 First 4)
+    assert MIN_EXOTIC_RETURN == {"exacta": 12.50, "trifecta": 10.00, "first4": 8.00}
+
+    # Construct market probs where Exacta return ~$11.00 (< $12.50 -> SKIP), Trifecta return ~$10.90 (>= $10.00 -> ACTIVE),
+    # and First 4 return ~$9.00 (>= $8.00 -> ACTIVE, whereas old $12.50 flat floor would have skipped both!)
+    mkt = {1: 0.42, 2: 0.25, 3: 0.14, 4: 0.09, 5: 0.04, 6: 0.03, 7: 0.02, 8: 0.01}
+
+    ex = _build_single_exotic("exacta", "Exacta", [[1, 2], [1, 2, 3]], 4, [1, 2], 8, False, mkt)
+    # anchor_prob = 0.42 * (0.25/0.58) = 0.1810 -> div ~4.36 -> return (4 combos, 250%) ~$10.91 < $12.50 -> SKIP
+    assert ex["skipped"] is True and "$12.50 min" in ex["skip_reason"]
+
+    tri = _build_single_exotic("trifecta", "Trifecta", [[1, 2], [1, 2, 3, 4], [1, 2, 3, 4, 5]], 18, [1, 2, 3], 8, False, mkt)
+    # anchor_prob = 0.1810 * (0.14/0.33) = 0.0768 -> div ~10.29 -> return (18 combos) ~$5.72 < $10.00 -> SKIP
+    assert tri["skipped"] is True and "$10.00 min" in tri["skip_reason"]
+
+    # Slightly less top-heavy field: Trifecta ~$11.00 (ACTIVE >= $10.00) and First 4 ~$9.50 (ACTIVE >= $8.00)
+    mkt_mid = {1: 0.34, 2: 0.22, 3: 0.14, 4: 0.10, 5: 0.07, 6: 0.05, 7: 0.04, 8: 0.04}
+    tri_ok = _build_single_exotic("trifecta", "Trifecta", [[1, 2], [1, 2, 3, 4], [1, 2, 3, 4, 5]], 18, [1, 2, 3], 8, False, mkt_mid)
+    assert tri_ok["skipped"] is False and 10.00 <= tri_ok["est_anchor_return"] < 14.00
+
+    f4_mkt = {1: 0.38, 2: 0.24, 3: 0.16, 4: 0.10, 5: 0.04, 6: 0.03, 7: 0.03, 8: 0.02}
+    f4_ok = _build_single_exotic("first4", "First 4", [[1, 2], [1, 2, 3, 4], [1, 2, 3, 4], [1, 2, 3, 4, 5]], 24, [1, 2, 3, 4], 8, False, f4_mkt)
+    # anchor_prob = 0.38*(0.24/0.62)*(0.16/0.38)*(0.10/0.22) = 0.02815 -> div ~28.06 -> return (24 combos) ~$11.69 >= $8.00 -> ACTIVE
+    assert f4_ok["skipped"] is False and f4_ok["est_anchor_return"] >= 8.00
+
+    f4_low_mkt = {1: 0.45, 2: 0.28, 3: 0.15, 4: 0.08, 5: 0.01, 6: 0.01, 7: 0.01, 8: 0.01}
+    f4_skip = _build_single_exotic("first4", "First 4", [[1, 2], [1, 2, 3, 4], [1, 2, 3, 4], [1, 2, 3, 4, 5]], 24, [1, 2, 3, 4], 8, False, f4_low_mkt)
+    assert f4_skip["skipped"] is True and "$8.00 min" in f4_skip["skip_reason"]
