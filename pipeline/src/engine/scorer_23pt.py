@@ -1005,29 +1005,103 @@ def score_race_23pt(
         wt_reason = f"Carries {carried:.1f}kg (field avg {avg_weight:.1f}kg" + (f", -{claim:.1f}kg claim)." if claim > 0 else ").")
         audit["weight_claims"] = {"score": wt_score, "has_data": True, "reason": wt_reason}
 
-        # 12. Jockey Track Familiarity (includes horse+jockey stats when provided)
+        # 13. Jockey–Horse Affinity (booked jockey's historical record on this specific horse; Bayes prior=12%, k=6)
         pp_stats = r.get("past_performance_stats") or {}
-        hj_stat = pp_stats.get("jockey") if isinstance(pp_stats, dict) else None
-        venue_name = (race.get("meeting_name") or track_meta.get("name") or "").lower()
-        venue_rides = [
-            jp for jp in jockey_perfs if isinstance(jp, dict) and venue_name and venue_name in str(jp.get("track") or jp.get("meeting") or "").lower()
-        ]
-        if isinstance(hj_stat, dict) and int(hj_stat.get("number_of_starts") or 0) > 0:
-            hs = int(hj_stat["number_of_starts"])
-            hw = int(hj_stat.get("number_of_wins") or 0)
-            jf_score = clamp(5.6 + (hw / hs) * 3.2 + min(1.0, hs * 0.25))
-            jf_reason = f"Jockey has {hw}W from {hs} ride(s) on {r.get('name')}."
-        elif venue_rides:
-            vw = sum(1 for jp in venue_rides if int(jp.get("position") or 99) == 1)
-            jf_score = clamp(5.5 + vw * 1.5 + min(1.5, len(venue_rides) * 0.3))
-            jf_reason = f"{len(venue_rides)} recent ride(s) at {race.get('meeting_name')} ({vw} win(s))."
-        elif any(ej in jockey_l for ej in ELITE_JOCKEYS):
-            jf_score = 6.5
-            jf_reason = f"Experienced metro jockey ({r.get('jockey')}) with strong venue familiarity."
+        hj_stat = r.get("jockey_horse_stats") or (pp_stats.get("jockey") if isinstance(pp_stats, dict) else None)
+        if isinstance(hj_stat, dict) and int(hj_stat.get("number_of_starts") or hj_stat.get("starts") or 0) > 0:
+            hs = int(hj_stat.get("number_of_starts") or hj_stat.get("starts") or 0)
+            hw = int(hj_stat.get("number_of_wins") or hj_stat.get("wins") or 0)
+            hp_explicit = int(hj_stat.get("number_of_placings") or hj_stat.get("places") or 0)
+            hp_parts = hw + int(hj_stat.get("number_of_seconds") or 0) + int(hj_stat.get("number_of_thirds") or 0)
+            hp = max(hp_parts, hp_explicit, hw)
+            raw_hsr = hw / hs
+            bayes_hsr = bayesian_strike_rate(hw, hs, prior_sr=BAYESIAN_SR_PRIOR, k=6.0)
+            bayes_hpr = bayesian_strike_rate(hp, hs, prior_sr=BAYESIAN_PR_PRIOR, k=6.0)
+            jha_score = clamp(3.0 + bayes_hsr * 15.0 + bayes_hpr * 3.0)
+            jha_reason = (
+                f"{r.get('jockey')} on {r.get('name')}: {hw}W-{max(0, hp - hw)}P from {hs} ride(s) "
+                f"({raw_hsr*100:.0f}% raw → {bayes_hsr*100:.1f}% Bayes SR, k=6)."
+            )
+            audit["jockey_horse_affinity"] = {"score": jha_score, "has_data": True, "reason": jha_reason}
         else:
-            jf_score = NEUTRAL_SCORE
-            jf_reason = "Standard track familiarity."
-        audit["jockey_track_familiarity"] = {"score": jf_score, "has_data": bool(hj_stat or venue_rides or any(ej in jockey_l for ej in ELITE_JOCKEYS)), "reason": jf_reason}
+            audit["jockey_horse_affinity"] = {
+                "score": NEUTRAL_SCORE,
+                "has_data": False,
+                "reason": "0 prior rides for booked jockey on this runner (neutral 5.0).",
+            }
+
+        # 14. Jockey Course & Track Record (booked jockey's win/place SR at today's venue; Bayes prior=12%, k=25)
+        venue_name = (race.get("meeting_name") or track_meta.get("name") or "").strip()
+        venue_lower = venue_name.lower()
+        venue_aliases = [venue_lower] + [str(a).strip().lower() for a in (track_meta.get("aliases") or []) if str(a).strip()]
+        course_stat = (
+            r.get("jockey_course_stats")
+            or (j_stats.get("track") if isinstance(j_stats, dict) else None)
+            or (j_stats.get("course") if isinstance(j_stats, dict) else None)
+            or (j_stats.get("venue") if isinstance(j_stats, dict) else None)
+        )
+        venue_rides = [
+            jp
+            for jp in jockey_perfs
+            if isinstance(jp, dict)
+            and any(va and va in str(jp.get("track") or jp.get("meeting") or jp.get("venue") or "").lower() for va in venue_aliases)
+        ]
+        trainer_loc = (r.get("trainer_location") or "").strip().lower()
+        is_local_track_stable = bool(trainer_loc and any(va and (va in trainer_loc or trainer_loc in va) for va in venue_aliases))
+
+        if isinstance(course_stat, dict) and int(course_stat.get("number_of_starts") or course_stat.get("starts") or 0) > 0:
+            cs = int(course_stat.get("number_of_starts") or course_stat.get("starts") or 0)
+            cw = int(course_stat.get("number_of_wins") or course_stat.get("wins") or 0)
+            cp_explicit = int(course_stat.get("number_of_placings") or course_stat.get("places") or 0)
+            cp_parts = cw + int(course_stat.get("number_of_seconds") or 0) + int(course_stat.get("number_of_thirds") or 0)
+            cp = max(cp_parts, cp_explicit, cw)
+            raw_csr = cw / cs
+            bayes_csr = bayesian_strike_rate(cw, cs, prior_sr=BAYESIAN_SR_PRIOR, k=BAYESIAN_PRIOR_STARTS)
+            bayes_cpr = bayesian_strike_rate(cp, cs, prior_sr=BAYESIAN_PR_PRIOR, k=BAYESIAN_PRIOR_STARTS)
+            jcr_score = clamp(3.2 + bayes_csr * 18.0 + bayes_cpr * 3.0 + (0.4 if any(ej in jockey_l for ej in ELITE_JOCKEYS) else 0.0))
+            jcr_reason = (
+                f"{r.get('jockey')} at {venue_name}: {cw}W-{max(0, cp - cw)}P from {cs} course ride(s) "
+                f"({raw_csr*100:.0f}% raw → {bayes_csr*100:.1f}% Bayes SR, k=25)."
+            )
+            audit["jockey_course_record"] = {"score": jcr_score, "has_data": True, "reason": jcr_reason}
+        elif venue_rides:
+            cs = len(venue_rides)
+            cw = sum(1 for jp in venue_rides if int(jp.get("position") or 99) == 1)
+            cp = sum(1 for jp in venue_rides if int(jp.get("position") or 99) <= 3)
+            raw_csr = cw / cs
+            bayes_csr = bayesian_strike_rate(cw, cs, prior_sr=BAYESIAN_SR_PRIOR, k=BAYESIAN_PRIOR_STARTS)
+            bayes_cpr = bayesian_strike_rate(cp, cs, prior_sr=BAYESIAN_PR_PRIOR, k=BAYESIAN_PRIOR_STARTS)
+            jcr_score = clamp(3.2 + bayes_csr * 18.0 + bayes_cpr * 3.0)
+            jcr_reason = (
+                f"{r.get('jockey')} at {venue_name}: {cw}W-{max(0, cp - cw)}P from {cs} recent ride(s) "
+                f"({raw_csr*100:.0f}% raw → {bayes_csr*100:.1f}% Bayes SR, k=25)."
+            )
+            audit["jockey_course_record"] = {"score": jcr_score, "has_data": True, "reason": jcr_reason}
+        elif is_local_track_stable and isinstance(tr_combo, dict) and int(tr_combo.get("number_of_starts") or 0) > 0:
+            cs = int(tr_combo["number_of_starts"])
+            cw = int(tr_combo.get("number_of_wins") or 0)
+            cp = cw + int(tr_combo.get("number_of_seconds") or 0) + int(tr_combo.get("number_of_thirds") or 0)
+            raw_csr = cw / cs
+            bayes_csr = bayesian_strike_rate(cw, cs, prior_sr=BAYESIAN_SR_PRIOR, k=BAYESIAN_PRIOR_STARTS)
+            bayes_cpr = bayesian_strike_rate(cp, cs, prior_sr=BAYESIAN_PR_PRIOR, k=BAYESIAN_PRIOR_STARTS)
+            jcr_score = clamp(3.2 + bayes_csr * 18.0 + bayes_cpr * 3.0)
+            jcr_reason = (
+                f"Home-course {venue_name} stable combo: {cw}W/{cs} ({raw_csr*100:.0f}% raw → {bayes_csr*100:.1f}% Bayes SR, k=25)."
+            )
+            audit["jockey_course_record"] = {"score": jcr_score, "has_data": True, "reason": jcr_reason}
+        elif any(ej in jockey_l for ej in ELITE_JOCKEYS):
+            tier_lbl = race.get("tier") or "Metro"
+            audit["jockey_course_record"] = {
+                "score": 6.4 if tier_lbl == "Metro" else 6.1,
+                "has_data": True,
+                "reason": f"Proven {tier_lbl}-tier venue rider ({r.get('jockey')}) at {venue_name or 'course'}.",
+            }
+        else:
+            audit["jockey_course_record"] = {
+                "score": NEUTRAL_SCORE,
+                "has_data": False,
+                "reason": "No course-specific jockey record available (neutral 5.0).",
+            }
 
         # 13. Speedmap & Pace Position
         if not sm_label:
@@ -1285,3 +1359,7 @@ def score_race_23pt(
 
     scored_runners.sort(key=lambda x: x["composite_score"], reverse=True)
     return scored_runners
+
+
+# Alias for the expanded 24-Point Rating Engine
+score_race_24pt = score_race_23pt

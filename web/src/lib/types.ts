@@ -109,6 +109,7 @@ export interface SrmCombo {
   unit_stake: number;
   skipped?: boolean;
   skip_reason?: string | null;
+  skip_badge?: string | null;
 }
 
 export interface ExoticTicket {

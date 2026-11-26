@@ -213,6 +213,7 @@ class LadbrokesSource:
                     "is_scratched": bool(r.get("is_scratched", False)),
                     "jockey": (r.get("jockey") or "TBA").strip(),
                     "trainer": (r.get("trainer_name") or "Unknown").strip(),
+                    "trainer_location": (r.get("trainer_location") or "").strip(),
                     "apprentice_claim_kg": claim_kg,
                     "weight_allocated": allocated_w,
                     "weight_carried": max(48.0, total_w - claim_kg) if total_w == allocated_w and claim_kg > 0 else total_w,

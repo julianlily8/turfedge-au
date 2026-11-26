@@ -96,6 +96,7 @@ def run_morning_ingest(date_str: str, dry_run: bool = False, max_meetings: int =
         manual_yt_urls = load_configured_youtube_urls(date_str, slug, firestore_config=yt_fs_config)
 
         fetched_events = []
+        preserved_races = []
         existing_map = {}
         summary_map = {}
         rail_position = "True"
@@ -104,6 +105,18 @@ def run_morning_ingest(date_str: str, dry_run: bool = False, max_meetings: int =
             race_id = r_summary["race_id"]
             if not race_id:
                 continue
+            existing = store.get_doc("races", race_id)
+            existing_map[race_id] = existing
+            summary_map[race_id] = r_summary
+            if existing and existing.get("baseline_analyzed") and not force:
+                logger.info(
+                    "Skipping already baseline-analyzed race %s R%s (force=False).",
+                    meeting["display_name"],
+                    existing.get("race_number") or r_summary.get("race_number"),
+                )
+                preserved_races.append(existing)
+                continue
+
             try:
                 ev = ladbrokes.fetch_race_event(race_id)
             except Exception as exc:
@@ -119,10 +132,6 @@ def run_morning_ingest(date_str: str, dry_run: bool = False, max_meetings: int =
             ev["weather"] = weather
             ev["track_meta"] = meeting["track_meta"]
 
-            # Preserve morning opening prices if race already ingested earlier today
-            existing = store.get_doc("races", race_id)
-            existing_map[race_id] = existing
-            summary_map[race_id] = r_summary
             existing_open_map = {}
             if existing:
                 for er in existing.get("scored_runners") or existing.get("runners") or []:
@@ -242,7 +251,12 @@ def run_morning_ingest(date_str: str, dry_run: bool = False, max_meetings: int =
             store.set_doc("races", race_id, race_doc, merge=True)
             meeting_races.append(race_doc)
 
-        quaddie_ticket = build_meeting_quaddie(meeting, meeting_races)
+        if not fetched_events and preserved_races:
+            logger.info("All %d race(s) for %s already baseline-analyzed; leaving meeting untouched.", len(preserved_races), meeting["display_name"])
+            continue
+
+        all_meeting_races = sorted(meeting_races + preserved_races, key=lambda r: int(r.get("race_number") or 0))
+        quaddie_ticket = build_meeting_quaddie(meeting, all_meeting_races)
         meeting_doc = {
             "meeting_id": meeting["meeting_id"],
             "meeting_slug": slug,
@@ -259,8 +273,8 @@ def run_morning_ingest(date_str: str, dry_run: bool = False, max_meetings: int =
             "weather": weather,
             "track_meta": meeting["track_meta"],
             "meeting_bias": meeting_bias,
-            "race_count": len(meeting_races),
-            "race_ids": [r["race_id"] for r in meeting_races],
+            "race_count": len(all_meeting_races),
+            "race_ids": [r["race_id"] for r in all_meeting_races],
             "updated_at": now_iso,
         }
         store.set_doc("meetings", meeting_doc_id, meeting_doc, merge=True)

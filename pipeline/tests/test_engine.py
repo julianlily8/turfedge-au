@@ -87,7 +87,7 @@ def test_strict_neutral_fallback_and_anti_hallucination_guard():
 
     scored = score_race_23pt(race, track_meta, weather)
     assert len(scored) == 9
-    assert len(scored[0]["audit_23pt"]) == 23
+    assert len(scored[0]["audit_23pt"]) == 24
 
     # Verify missing text fields are strictly 5.0 / "No data available"
     audit_map = {a["key"]: a for a in scored[0]["audit_23pt"]}
@@ -763,3 +763,117 @@ def test_srm_min_odds_gate_picnic_margin_bayesian_and_two_tier_outsider_ceiling(
     settled = settle_race(low_srm_race, results, {"best_tote_win": {"1": 18.0}})
     settled_srm_legs = {s["leg_count"] for s in settled["srm"]}
     assert 2 not in settled_srm_legs
+
+
+def test_24pt_weights_jockey_split_and_srm_field_size_precedence():
+    from pipeline.src.engine.scorer_24pt import load_factor_weights, score_race_24pt
+
+    # 1) Verify exact 24 factors summing to 100.0%
+    cfg = load_factor_weights()
+    factors = cfg["factors"]
+    assert len(factors) == 24
+    total_w = round(sum(float(f["weight"]) for f in factors), 4)
+    assert total_w == 100.0
+    w_map = {f["key"]: float(f["weight"]) for f in factors}
+    assert w_map["jockey_horse_affinity"] == 2.5
+    assert w_map["jockey_course_record"] == 2.5
+    assert "jockey_track_familiarity" not in w_map
+
+    # 2) Verify Jockey-Horse Affinity (k=6) vs Bayesian Jockey Course Record (k=25)
+    track_meta = {"name": "Mornington", "home_straight_m": 250, "turning": "Anti-clockwise", "aliases": ["Mornington"]}
+    weather = {"source": "BOM Hourly API", "headwind_kmh": 0.0, "wind_speed_kmh": 5.0, "rain_expected_mm": 0.0, "effect": "Calm"}
+    race = _sample_race(field_size=6)
+    race["meeting_name"] = "Mornington"
+    # Runner 1: 0 prior jockey-horse rides -> neutral 5.0; established course specialist 18W/75 at Mornington
+    race["runners"][0]["past_performance_stats"] = {"jockey": {"number_of_starts": 0, "number_of_wins": 0}}
+    race["runners"][0]["jockey_stats"] = {"track": {"number_of_starts": 75, "number_of_wins": 18, "number_of_seconds": 10, "number_of_thirds": 8}}
+    # Runner 2: 3W/6 rides on this horse (strong affinity); low-sample course record 1W/2 (50% raw -> 14.8% Bayes SR)
+    race["runners"][1]["jockey"] = "Apprentice Two"
+    race["runners"][1]["past_performance_stats"] = {"jockey": {"number_of_starts": 6, "number_of_wins": 3, "number_of_seconds": 1, "number_of_thirds": 0}}
+    race["runners"][1]["jockey_stats"] = {"track": {"number_of_starts": 2, "number_of_wins": 1, "number_of_seconds": 0, "number_of_thirds": 0}}
+    # Runner 3: 1W/1 ride on this horse (100% raw -> 24.6% Bayes SR, moderated below 3W/6 = 31.0% Bayes SR!)
+    race["runners"][2]["jockey"] = "Jockey Three"
+    race["runners"][2]["past_performance_stats"] = {"jockey": {"number_of_starts": 1, "number_of_wins": 1, "number_of_seconds": 0, "number_of_thirds": 0}}
+    race["runners"][2]["jockey_stats"] = {}
+
+    scored = score_race_24pt(race, track_meta, weather)
+    aud = {r["runner_number"]: {a["key"]: a for a in r["audit_23pt"]} for r in scored}
+
+    # Jockey-Horse Affinity checks
+    assert aud[1]["jockey_horse_affinity"]["score"] == NEUTRAL_SCORE
+    assert aud[1]["jockey_horse_affinity"]["has_data"] is False
+    assert aud[2]["jockey_horse_affinity"]["has_data"] is True
+    assert aud[3]["jockey_horse_affinity"]["has_data"] is True
+    assert aud[2]["jockey_horse_affinity"]["score"] > aud[3]["jockey_horse_affinity"]["score"]
+
+    # Jockey Course Record checks: established 18/75 (21.0% Bayes SR) MUST beat low-sample 1/2 (14.8% Bayes SR)
+    assert aud[1]["jockey_course_record"]["has_data"] is True
+    assert aud[2]["jockey_course_record"]["has_data"] is True
+    assert "14.8% Bayes SR" in aud[2]["jockey_course_record"]["reason"]
+    assert aud[1]["jockey_course_record"]["score"] > aud[2]["jockey_course_record"]["score"]
+    assert aud[3]["jockey_course_record"]["score"] == NEUTRAL_SCORE
+    assert aud[3]["jockey_course_record"]["has_data"] is False
+
+    # 3) SRM Field-Size Skip Precedence strictly BEFORE $1.80 minimum odds gate
+    # Case A: 4-runner field with ultra-short odds (< $1.80) -> ALL SRMs must show MIN FIELD 5 (not LOW ODDS!)
+    four_runner_race = {
+        "race_id": "race-4-runners",
+        "date": "2026-11-27",
+        "meeting_slug": "flemington",
+        "meeting_name": "Flemington",
+        "race_number": 1,
+        "name": "Small 4-Runner Sprint",
+        "scored_runners": [
+            {"runner_number": 1, "name": "Short A", "barrier": 1, "jockey": "J1", "trainer": "T1", "composite_score": 76.0, "opening_win": 1.3, "live_win": 1.2, "market_fluc": {"direction": "Firmer", "fluc_pct": 8.3}},
+            {"runner_number": 2, "name": "Short B", "barrier": 2, "jockey": "J2", "trainer": "T2", "composite_score": 70.0, "opening_win": 2.4, "live_win": 2.2, "market_fluc": {"direction": "Firmer", "fluc_pct": 9.1}},
+            {"runner_number": 3, "name": "Mid C", "barrier": 3, "jockey": "J3", "trainer": "T3", "composite_score": 55.0, "opening_win": 10.0, "live_win": 12.0, "market_fluc": {"direction": "Drifter", "fluc_pct": -16.7}},
+            {"runner_number": 4, "name": "Long D", "barrier": 4, "jockey": "J4", "trainer": "T4", "composite_score": 48.0, "opening_win": 21.0, "live_win": 31.0, "market_fluc": {"direction": "Drifter", "fluc_pct": -32.3}},
+        ],
+    }
+    p4 = price_and_generate_bets(four_runner_race)
+    for combo in p4["srm_combos"]:
+        assert combo["skipped"] is True
+        assert combo["unit_stake"] == 0.0
+        assert combo["skip_reason"] == "Skipped: Field size < 5 min for SRM"
+        assert combo["skip_badge"] == "SKIP · MIN FIELD 5"
+
+    # Case B: 5-runner field -> 2-Leg evaluated by $1.80 gate, while 3-Leg & 4-Leg get MIN FIELD 6 (even if < $1.80!)
+    five_runner_race = {
+        "race_id": "race-5-runners",
+        "date": "2026-11-27",
+        "meeting_slug": "flemington",
+        "meeting_name": "Flemington",
+        "race_number": 2,
+        "name": "5-Runner Handicap",
+        "scored_runners": [
+            {"runner_number": 1, "name": "Even A", "barrier": 1, "jockey": "J1", "trainer": "T1", "composite_score": 60.0, "opening_win": 3.5, "live_win": 3.5, "market_fluc": {"direction": "Steady", "fluc_pct": 0.0}},
+            {"runner_number": 2, "name": "Even B", "barrier": 2, "jockey": "J2", "trainer": "T2", "composite_score": 58.0, "opening_win": 4.0, "live_win": 4.0, "market_fluc": {"direction": "Steady", "fluc_pct": 0.0}},
+            {"runner_number": 3, "name": "Even C", "barrier": 3, "jockey": "J3", "trainer": "T3", "composite_score": 56.0, "opening_win": 5.0, "live_win": 5.0, "market_fluc": {"direction": "Steady", "fluc_pct": 0.0}},
+            {"runner_number": 4, "name": "Even D", "barrier": 4, "jockey": "J4", "trainer": "T4", "composite_score": 54.0, "opening_win": 6.0, "live_win": 6.0, "market_fluc": {"direction": "Steady", "fluc_pct": 0.0}},
+            {"runner_number": 5, "name": "Even E", "barrier": 5, "jockey": "J5", "trainer": "T5", "composite_score": 52.0, "opening_win": 7.0, "live_win": 7.0, "market_fluc": {"direction": "Steady", "fluc_pct": 0.0}},
+        ],
+    }
+    p5 = price_and_generate_bets(five_runner_race)
+    s5_map = {c["leg_count"]: c for c in p5["srm_combos"]}
+    # 3-Leg & 4-Leg must ALWAYS be skipped with MIN FIELD 6 in a 5-runner field (even when est_odds < $1.80)
+    assert s5_map[3]["skipped"] is True
+    assert s5_map[3]["skip_reason"] == "Skipped: Top 4 SRM requires 6+ runners"
+    assert s5_map[3]["skip_badge"] == "SKIP · MIN FIELD 6"
+    assert s5_map[4]["skipped"] is True
+    assert s5_map[4]["skip_reason"] == "Skipped: Top 4 SRM requires 6+ runners"
+    assert s5_map[4]["skip_badge"] == "SKIP · MIN FIELD 6"
+    # 2-Leg in a 5-runner field passes Steps 1-2 and is judged only by Step 3 ($1.80 gate)
+    if s5_map[2]["estimated_odds"] < 1.80:
+        assert s5_map[2]["skip_badge"] == "SKIP · LOW ODDS"
+    else:
+        assert s5_map[2]["skipped"] is False
+
+    # Confirm settle_race excludes all field-gated SRMs
+    five_runner_race.update(p5)
+    results5 = [
+        {"position": i, "runner_number": i, "name": f"Even {i}", "barrier": i, "margin_length": i * 0.5}
+        for i in range(1, 6)
+    ]
+    settled5 = settle_race(five_runner_race, results5, {"best_tote_win": {"1": 3.5}})
+    settled5_legs = {s["leg_count"] for s in settled5["srm"]}
+    assert 3 not in settled5_legs and 4 not in settled5_legs

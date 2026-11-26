@@ -144,7 +144,7 @@ export function TabProfitability({
       <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-10 text-center">
         <h2 className="text-base font-bold text-white">No Settled Races in Firestore Yet</h2>
         <p className="mx-auto mt-2 max-w-md text-xs text-slate-400">
-          Only races that complete Gemini analysis are settled here. Once races finish,{' '}
+          Only races with locked 24-Point selections are settled here. Once races finish,{' '}
           <code>post-race-settle.yml</code> automatically records official tote dividends and Betfair BSPs every 45 minutes.
         </p>
       </div>
@@ -456,10 +456,10 @@ export function TabProfitability({
         </div>
       </div>
 
-      {/* Cumulative P/L Chart + All-23 Factor Attribution */}
-      <div className="grid gap-4 lg:grid-cols-12">
-        <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 lg:col-span-6">
-          <h3 className="mb-3 text-sm font-bold text-white">Cumulative Net P/L Curve ($10 Units)</h3>
+      {/* Split Cumulative Net P/L Curves: Chart 1 (Win & SRMs) + Chart 2 (Exotics) */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
+          <h3 className="mb-3 text-sm font-bold text-white">Win &amp; Same Race Multi Cumulative P/L ($10 Units)</h3>
           {stats.cumulative.length === 0 ? (
             <p className="py-12 text-center text-xs text-slate-500">No settled bets match the current filters.</p>
           ) : (
@@ -478,20 +478,52 @@ export function TabProfitability({
                     }}
                   />
                   <Legend wrapperStyle={{ fontSize: '11px' }} />
-                  <Line type="monotone" dataKey="winOverlayCum" name="Win (Overlays)" stroke="#10b981" strokeWidth={2.5} dot={{ r: 3 }} />
                   <Line type="monotone" dataKey="winAllCum" name="Win (All)" stroke="#38bdf8" strokeWidth={2} dot={{ r: 2 }} />
+                  <Line type="monotone" dataKey="winOverlayCum" name="Win (Overlays)" stroke="#10b981" strokeWidth={2.5} dot={{ r: 2.5 }} />
                   <Line type="monotone" dataKey="srm2Cum" name="2-Leg SRM" stroke="#a78bfa" strokeWidth={2} dot={{ r: 2 }} />
-                  <Line type="monotone" dataKey="exoticsCum" name="Exotics" stroke="#f59e0b" strokeWidth={2} dot={{ r: 2 }} />
+                  <Line type="monotone" dataKey="srm3Cum" name="3-Leg SRM" stroke="#f472b6" strokeWidth={2} dot={{ r: 2 }} />
+                  <Line type="monotone" dataKey="srm4Cum" name="4-Leg SRM" stroke="#fb923c" strokeWidth={2} dot={{ r: 2 }} />
                 </LineChart>
               </ResponsiveContainer>
             </div>
           )}
         </div>
 
-        {/* All-23 Factor Attribution (Never silently omits neutral factors) */}
-        <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 lg:col-span-6">
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
+          <h3 className="mb-3 text-sm font-bold text-white">Exotics Cumulative P/L ($10 Flexi Units)</h3>
+          {stats.cumulative.length === 0 ? (
+            <p className="py-12 text-center text-xs text-slate-500">No settled bets match the current filters.</p>
+          ) : (
+            <div className="h-72 w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={stats.cumulative}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                  <XAxis dataKey="label" tick={{ fill: '#94a3b8', fontSize: 11 }} />
+                  <YAxis tick={{ fill: '#94a3b8', fontSize: 11 }} tickFormatter={(v) => `$${v}`} />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: '#0f172a',
+                      border: '1px solid #334155',
+                      borderRadius: '10px',
+                      fontSize: '12px',
+                    }}
+                  />
+                  <Legend wrapperStyle={{ fontSize: '11px' }} />
+                  <Line type="monotone" dataKey="exactaCum" name="Exacta" stroke="#f59e0b" strokeWidth={2} dot={{ r: 2 }} />
+                  <Line type="monotone" dataKey="trifectaCum" name="Trifecta" stroke="#22d3ee" strokeWidth={2} dot={{ r: 2 }} />
+                  <Line type="monotone" dataKey="first4Cum" name="First 4" stroke="#34d399" strokeWidth={2.5} dot={{ r: 2.5 }} />
+                  <Line type="monotone" dataKey="quaddieCum" name="Quaddie" stroke="#c084fc" strokeWidth={2} dot={{ r: 2 }} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* All-24 Factor Attribution (Never silently omits neutral factors) */}
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-sm font-bold text-white">23-Factor Attribution (Weight Tuning)</h3>
+            <h3 className="text-sm font-bold text-white">24-Factor Attribution (Weight Tuning)</h3>
             <div className="flex flex-wrap items-center gap-1.5">
               <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-bold text-emerald-300">
                 {liveFactorCount} LIVE
@@ -507,13 +539,13 @@ export function TabProfitability({
             </div>
           </div>
           <p className="mb-2.5 mt-1 text-[11px] text-slate-400">
-            All 23 factors shown. Signals stay <strong>Low Sample</strong> until 100+ wins; then Δ ≥ +0.5 → Boost, ≤ −0.5 → Trim.
+            All 24 factors shown. Signals stay <strong>Low Sample</strong> until 100+ wins; then Δ ≥ +0.5 → Boost, ≤ −0.5 → Trim.
           </p>
           <div className="max-h-72 overflow-y-auto pr-1">
             <table className="w-full text-left text-[11px]">
               <thead className="sticky top-0 bg-slate-900 text-slate-400">
                 <tr>
-                  <th className="py-1.5">Factor (23)</th>
+                  <th className="py-1.5">Factor (24)</th>
                   <th className="py-1.5">Source</th>
                   <th className="py-1.5 text-right">Win vs Loss</th>
                   <th className="py-1.5 text-right">Signal</th>
@@ -567,7 +599,6 @@ export function TabProfitability({
               </tbody>
             </table>
           </div>
-        </div>
       </div>
 
       {/* Settled Bets Ledger — All 9 Bet Types, Filters & Expandable Overrides */}

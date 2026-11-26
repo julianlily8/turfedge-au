@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pipeline.src.engine.pricing import MIN_SRM_ODDS, SRM_CORRELATION_HAIRCUT, UNIT_STAKE
+from pipeline.src.engine.pricing import (
+    MIN_SRM_FIELD_SIZE,
+    MIN_SRM_ODDS,
+    MIN_SRM_TOP4_FIELD_SIZE,
+    SRM_CORRELATION_HAIRCUT,
+    UNIT_STAKE,
+)
 from pipeline.src.sources.betfair_bsp import normalize_horse_name
 
 
@@ -108,15 +114,24 @@ def settle_race(
         if win_sel.get("is_value_overlay"):
             overlay_bet = dict(win_bet, category="win_overlay")
 
-    # Same Race Multi settlement (with 0.75x correlation haircut, $1.80 min odds gate & scratching/missing-position voiding)
+    # Same Race Multi settlement (Sportsbet field-size gates -> $1.80 min odds gate -> 0.75x haircut & voiding)
+    active_runners_count = sum(
+        1
+        for r in (race.get("scored_runners") or [])
+        if not r.get("is_scratched") and int(r.get("runner_number") or 0) not in scratched_set
+    )
     srm_settlements: List[Dict[str, Any]] = []
     for combo in race.get("srm_combos") or []:
+        leg_count = int(combo.get("leg_count") or len(combo.get("legs") or []))
         raw_harville = float(combo.get("raw_harville_odds") or combo.get("estimated_odds") or 1.0)
         haircut = float(combo.get("haircut_factor") or SRM_CORRELATION_HAIRCUT)
         est_odds = round(float(combo.get("estimated_odds") or max(1.25, raw_harville * haircut)), 2)
 
-        # Never stake or count skipped low-odds (< $1.80) SRMs in Tab 2 POT%
-        if combo.get("skipped") or float(combo.get("unit_stake", UNIT_STAKE)) <= 0.0 or est_odds < MIN_SRM_ODDS:
+        # Never stake or count skipped SRMs (field size < 5, 5-runner Top 4 cap, or < $1.80 est odds)
+        field_gated = (active_runners_count > 0 and active_runners_count < MIN_SRM_FIELD_SIZE) or (
+            active_runners_count > 0 and active_runners_count < MIN_SRM_TOP4_FIELD_SIZE and leg_count >= 3
+        )
+        if combo.get("skipped") or float(combo.get("unit_stake", UNIT_STAKE)) <= 0.0 or field_gated or est_odds < MIN_SRM_ODDS:
             continue
 
         legs = combo.get("legs") or []

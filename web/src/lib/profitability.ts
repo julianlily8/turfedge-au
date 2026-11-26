@@ -141,7 +141,57 @@ export interface CumulativePoint {
   winAllCum: number;
   winOverlayCum: number;
   srm2Cum: number;
-  exoticsCum: number;
+  srm3Cum: number;
+  srm4Cum: number;
+  exactaCum: number;
+  trifectaCum: number;
+  first4Cum: number;
+  quaddieCum: number;
+}
+
+const SHORT_VENUE_MAP: Record<string, string> = {
+  mornington: 'Morn',
+  hawkesbury: 'Hawk',
+  geelong: 'Geel',
+  ipswich: 'Ipsw',
+  launceston: 'Laun',
+  wyong: 'Wyong',
+  flemington: 'Flem',
+  randwick: 'Rand',
+  rosehill: 'Rose',
+  caulfield: 'Caul',
+  sandown: 'Sand',
+  doomben: 'Doom',
+  'eagle farm': 'EF',
+  'moonee valley': 'MV',
+  'the valley': 'MV',
+  'warwick farm': 'WF',
+  canterbury: 'Cant',
+  kensington: 'Kens',
+  'kembla grange': 'Kembla',
+  newcastle: 'Newc',
+  gosford: 'Gosf',
+  pakenham: 'Pak',
+  cranbourne: 'Cran',
+  bendigo: 'Bend',
+  ballarat: 'Ball',
+  morphettville: 'Morph',
+  ascot: 'Ascot',
+  belmont: 'Belm',
+  'sunshine coast': 'SCst',
+  'gold coast': 'GCst',
+  hobart: 'Hob',
+  canberra: 'Canb',
+};
+
+export function formatShortVenue(meetingName: string): string {
+  const cleaned = (meetingName || '')
+    .replace(/^(ladbrokes|sportsbet|tab|royal|bet365|thomas farms|southside)\s+/i, '')
+    .trim();
+  const key = cleaned.toLowerCase();
+  if (SHORT_VENUE_MAP[key]) return SHORT_VENUE_MAP[key];
+  const firstWord = cleaned.split(/\s+/)[0] || cleaned;
+  return firstWord.length <= 5 ? firstWord : firstWord.slice(0, 4);
 }
 
 export const MIN_SAMPLE_WINS_FOR_TUNING = 100;
@@ -471,7 +521,12 @@ export function computeProfitability(
   let winAllCum = 0;
   let winOverlayCum = 0;
   let srm2Cum = 0;
-  let exoticsCum = 0;
+  let srm3Cum = 0;
+  let srm4Cum = 0;
+  let exactaCum = 0;
+  let trifectaCum = 0;
+  let first4Cum = 0;
+  let quaddieCum = 0;
   let totalWinCount = 0;
   const cumulative: CumulativePoint[] = [];
 
@@ -529,8 +584,13 @@ export function computeProfitability(
       const ov = overrides[overrideKey(s.settlement_id, key)];
       const ret = effectiveReturn(srm.won, srm.stake, srm.return, ov);
       add(key, srm.stake, srm.won, ret, srm.void);
+      const delta = ret - srm.stake;
       if (srm.leg_count === 2) {
-        srm2Cum = Math.round((srm2Cum + ret - srm.stake) * 100) / 100;
+        srm2Cum = Math.round((srm2Cum + delta) * 100) / 100;
+      } else if (srm.leg_count === 3) {
+        srm3Cum = Math.round((srm3Cum + delta) * 100) / 100;
+      } else if (srm.leg_count === 4) {
+        srm4Cum = Math.round((srm4Cum + delta) * 100) / 100;
       }
     });
 
@@ -540,23 +600,36 @@ export function computeProfitability(
       const ov = overrides[overrideKey(s.settlement_id, exKey)];
       const ret = effectiveReturn(bet.won, bet.stake, bet.return, ov, bet.flexi_pct);
       add(exKey, bet.stake, bet.won, ret, bet.void);
-      exoticsCum = Math.round((exoticsCum + ret - bet.stake) * 100) / 100;
+      const delta = ret - bet.stake;
+      if (exKey === 'exacta') {
+        exactaCum = Math.round((exactaCum + delta) * 100) / 100;
+      } else if (exKey === 'trifecta') {
+        trifectaCum = Math.round((trifectaCum + delta) * 100) / 100;
+      } else if (exKey === 'first4') {
+        first4Cum = Math.round((first4Cum + delta) * 100) / 100;
+      }
     });
 
     if (s.quaddie && !s.quaddie.void && s.quaddie.stake > 0) {
       const ov = overrides[overrideKey(s.settlement_id, 'quaddie')];
       const ret = effectiveReturn(s.quaddie.won, s.quaddie.stake, s.quaddie.return, ov, s.quaddie.flexi_pct);
       add('quaddie', s.quaddie.stake, s.quaddie.won, ret, s.quaddie.void);
-      exoticsCum = Math.round((exoticsCum + ret - s.quaddie.stake) * 100) / 100;
+      quaddieCum = Math.round((quaddieCum + ret - s.quaddie.stake) * 100) / 100;
     }
 
+    const shortVenue = formatShortVenue(s.meeting_name);
     cumulative.push({
-      label: s.kind === 'quaddie' ? `${s.meeting_name} Q` : `${s.meeting_name.slice(0, 6)} R${s.race_number}`,
+      label: s.kind === 'quaddie' ? `${shortVenue} Q` : `${shortVenue} R${s.race_number}`,
       date: s.date,
       winAllCum,
       winOverlayCum,
       srm2Cum,
-      exoticsCum,
+      srm3Cum,
+      srm4Cum,
+      exactaCum,
+      trifectaCum,
+      first4Cum,
+      quaddieCum,
     });
   });
 
@@ -596,7 +669,7 @@ export function computeProfitability(
 
   // Strict delta threshold + 100-win minimum sample-size guard:
   // Force 'Low Sample' whenever total settled wins < 100 so small-sample noise never shows Boost/Keep/Trim.
-  // Always return ALL 23 factors with an explicit hasLiveData flag (never silently dropping neutral 5.0 factors).
+  // Always return ALL 24 factors with an explicit hasLiveData flag (never silently dropping neutral 5.0 factors).
   const factorDiagnostics: FactorDiagnostic[] = FACTOR_DEFINITIONS.map((f) => {
     const st = factorStats[f.key];
     const sampleCount = st.winScores.length + st.lossScores.length;

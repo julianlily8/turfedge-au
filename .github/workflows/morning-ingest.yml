@@ -19,7 +19,7 @@ on:
         default: 'true'
 
 concurrency:
-  group: morning-ingest
+  group: turfedge-morning-ingest
   cancel-in-progress: false
 
 jobs:

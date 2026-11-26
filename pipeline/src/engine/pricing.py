@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional
 from pipeline.src.engine.scorer_23pt import load_factor_weights
 
 SRM_CORRELATION_HAIRCUT = 0.75
+MIN_SRM_FIELD_SIZE = 5
+MIN_SRM_TOP4_FIELD_SIZE = 6
 MIN_SRM_ODDS = 1.80
 UNIT_STAKE = 10.0
 SHORT_FAV_ODDS_THRESHOLD = 2.30
@@ -271,13 +273,31 @@ def _make_srm_combo(
     fair_mult: float,
     discounted_odds: float,
     haircut: float,
+    active_runners: int,
 ) -> Dict[str, Any]:
-    is_skipped = discounted_odds < MIN_SRM_ODDS
-    skip_reason = (
-        f"Skipped: Est. odds ${discounted_odds:.2f} < ${MIN_SRM_ODDS:.2f} min (low payout)"
-        if is_skipped
-        else None
-    )
+    """
+    Apply Sportsbet SRM field-size & place-cap rules strictly BEFORE the $1.80 min odds gate:
+      Step 1 (active_runners < 5): skip all SRMs -> SKIP · MIN FIELD 5
+      Step 2 (active_runners == 5 and leg_count >= 3): skip 3-Leg/4-Leg -> SKIP · MIN FIELD 6
+      Step 3 (discounted_odds < $1.80): skip low payout -> SKIP · LOW ODDS
+    """
+    is_skipped = False
+    skip_reason: Optional[str] = None
+    skip_badge: Optional[str] = None
+
+    if active_runners < MIN_SRM_FIELD_SIZE:
+        is_skipped = True
+        skip_reason = "Skipped: Field size < 5 min for SRM"
+        skip_badge = "SKIP · MIN FIELD 5"
+    elif active_runners < MIN_SRM_TOP4_FIELD_SIZE and leg_count >= 3:
+        is_skipped = True
+        skip_reason = "Skipped: Top 4 SRM requires 6+ runners"
+        skip_badge = "SKIP · MIN FIELD 6"
+    elif discounted_odds < MIN_SRM_ODDS:
+        is_skipped = True
+        skip_reason = f"Skipped: Est. odds ${discounted_odds:.2f} < ${MIN_SRM_ODDS:.2f} min (low payout)"
+        skip_badge = "SKIP · LOW ODDS"
+
     return {
         "leg_count": leg_count,
         "label": label,
@@ -288,6 +308,7 @@ def _make_srm_combo(
         "unit_stake": 0.0 if is_skipped else UNIT_STAKE,
         "skipped": is_skipped,
         "skip_reason": skip_reason,
+        "skip_badge": skip_badge,
     }
 
 
@@ -312,6 +333,7 @@ def _build_srm_combos(runners: List[Dict[str, Any]], haircut: float) -> List[Dic
                 fair_mult=fair_mult,
                 discounted_odds=discounted_odds,
                 haircut=haircut,
+                active_runners=n,
             )
         )
 
@@ -333,6 +355,7 @@ def _build_srm_combos(runners: List[Dict[str, Any]], haircut: float) -> List[Dic
                 fair_mult=fair_mult,
                 discounted_odds=discounted_odds,
                 haircut=haircut,
+                active_runners=n,
             )
         )
 
@@ -361,6 +384,7 @@ def _build_srm_combos(runners: List[Dict[str, Any]], haircut: float) -> List[Dic
                 fair_mult=fair_mult,
                 discounted_odds=discounted_odds,
                 haircut=haircut,
+                active_runners=n,
             )
         )
 

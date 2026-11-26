@@ -141,7 +141,7 @@ export function ManualDropzone({ onRaceScored }: Props) {
         <div>
           <h3 className="text-sm font-semibold text-slate-100">Manual CSV / JSON Race-Data Dropzone Fallback</h3>
           <p className="text-xs text-slate-400">
-            Drop or paste any race card to score all 23 factors, Harville Top 2/3/4/10, Value Overlays, and Exotics locally in your browser.
+            Drop or paste any race card to score all 24 factors, Harville Top 2/3/4/10, Value Overlays, and Exotics locally in your browser.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -265,7 +265,7 @@ export function ManualDropzone({ onRaceScored }: Props) {
             onClick={() => processPayload(rawText)}
             className="rounded-lg bg-emerald-500 px-4 py-1.5 text-xs font-semibold text-slate-950 hover:bg-emerald-400"
           >
-            Score 23-Point Race
+            Score 24-Point Race
           </button>
         </div>
       </div>

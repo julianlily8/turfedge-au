@@ -5,29 +5,30 @@ export const NEUTRAL_SCORE = 5.0;
 export const NO_DATA_LABEL = 'No data available';
 
 export const FACTOR_DEFINITIONS: { key: string; label: string; weight: number; category: string }[] = [
-  { key: 'weather_ground', label: 'Weather & Ground Forecast', weight: 5.0, category: 'Track & Conditions' },
-  { key: 'rail_placement', label: 'Rail Placement', weight: 4.0, category: 'Track & Conditions' },
+  { key: 'weather_ground', label: 'Weather & Ground Forecast', weight: 4.5, category: 'Track & Conditions' },
+  { key: 'rail_placement', label: 'Rail Placement', weight: 3.5, category: 'Track & Conditions' },
   { key: 'wind_impact', label: 'Wind Speed & Direction Impact', weight: 3.0, category: 'Track & Conditions' },
   { key: 'current_meeting_bias', label: 'Current Meeting Track Bias', weight: 5.0, category: 'Track & Conditions' },
   { key: 'historical_track_bias', label: 'Historical Race & Track Bias', weight: 3.5, category: 'Track & Conditions' },
+  { key: 'barrier_geometry', label: 'Barrier Draw & Track Geometry', weight: 4.0, category: 'Track & Conditions' },
   { key: 'adjusted_sectionals', label: 'Adjusted Sectionals', weight: 8.0, category: 'Performance & Speed' },
   { key: 'recent_trials', label: 'Recent Trials & Jumpouts', weight: 4.0, category: 'Performance & Speed' },
-  { key: 'pedigree_suitability', label: 'Pedigree & Sire/Dam Suitability', weight: 3.5, category: 'Profile & Fitness' },
-  { key: 'jockey_form', label: 'Jockey Recent Form', weight: 5.0, category: 'Connections' },
-  { key: 'trainer_form', label: 'Trainer Recent Form', weight: 5.0, category: 'Connections' },
-  { key: 'weight_claims', label: 'Weight & Apprentice Claims', weight: 4.0, category: 'Profile & Fitness' },
-  { key: 'jockey_track_familiarity', label: 'Jockey Track Familiarity', weight: 3.0, category: 'Connections' },
   { key: 'speedmap_pace', label: 'Speedmap & Pace Position', weight: 7.0, category: 'Performance & Speed' },
   { key: 'days_since_run', label: 'Days Since Last Run / Trial', weight: 4.0, category: 'Profile & Fitness' },
   { key: 'gear_changes', label: 'Gear Changes', weight: 3.0, category: 'Profile & Fitness' },
+  { key: 'weight_claims', label: 'Weight & Apprentice Claims', weight: 3.5, category: 'Profile & Fitness' },
+  { key: 'jockey_form', label: 'Jockey Recent Form', weight: 5.0, category: 'Connections' },
+  { key: 'jockey_horse_affinity', label: 'Jockey–Horse Affinity', weight: 2.5, category: 'Connections' },
+  { key: 'jockey_course_record', label: 'Jockey Course & Track Record', weight: 2.5, category: 'Connections' },
+  { key: 'trainer_form', label: 'Trainer Recent Form', weight: 5.0, category: 'Connections' },
+  { key: 'pedigree_suitability', label: 'Pedigree & Sire/Dam Suitability', weight: 3.0, category: 'Profile & Fitness' },
+  { key: 'target_race_prep', label: 'Target-Race Preparation Weighting', weight: 4.0, category: 'Profile & Fitness' },
+  { key: 'class_track_distance', label: 'Class, Track & Distance Record', weight: 5.0, category: 'Performance & Speed' },
   { key: 'injury_history', label: 'Injury & Vet History', weight: 2.5, category: 'Qualitative & Intel' },
   { key: 'stewards_comments', label: 'Stewards Comments', weight: 3.5, category: 'Qualitative & Intel' },
   { key: 'trainer_jockey_commentary', label: 'Trainer & Jockey Commentary', weight: 3.0, category: 'Qualitative & Intel' },
-  { key: 'target_race_prep', label: 'Target-Race Preparation Weighting', weight: 4.0, category: 'Profile & Fitness' },
   { key: 'youtube_transcripts', label: 'YouTube Preview Transcripts', weight: 2.5, category: 'Qualitative & Intel' },
   { key: 'market_fluc', label: 'Live Market Firming / Drifting %', weight: 8.5, category: 'Market' },
-  { key: 'barrier_geometry', label: 'Barrier Draw & Track Geometry', weight: 4.0, category: 'Track & Conditions' },
-  { key: 'class_track_distance', label: 'Class, Track & Distance Record', weight: 5.0, category: 'Performance & Speed' },
 ];
 
 export interface ManualRunnerInput {
@@ -170,7 +171,8 @@ export function scoreManualRace(input: ManualRaceInput): RaceDoc {
         has_data: true,
         reason: `Carries ${carried.toFixed(1)}kg (avg ${avgWeight.toFixed(1)}kg).`,
       },
-      jockey_track_familiarity: { score: NEUTRAL_SCORE, has_data: false, reason: NO_DATA_LABEL },
+      jockey_horse_affinity: { score: NEUTRAL_SCORE, has_data: false, reason: '0 prior rides for booked jockey on this runner (neutral 5.0).' },
+      jockey_course_record: { score: NEUTRAL_SCORE, has_data: false, reason: 'No course-specific jockey record available (neutral 5.0).' },
       speedmap_pace: r.speedmap
         ? { score: onPace ? 6.9 : 5.3, has_data: true, reason: `Maps ${r.speedmap}.` }
         : { score: NEUTRAL_SCORE, has_data: false, reason: NO_DATA_LABEL },

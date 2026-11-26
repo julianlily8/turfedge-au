@@ -162,12 +162,9 @@ export default function App() {
             <div>
               <div className="flex items-center gap-2">
                 <h1 className="text-base font-extrabold tracking-tight text-white">TurfEdge AU</h1>
-                <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-bold text-emerald-300 ring-1 ring-emerald-500/30">
-                  $0 SPARK CLOUD
-                </span>
               </div>
               <p className="text-[11px] text-slate-400">
-                23-Point Selection · Market Fluc · Gemini 3.1 Flash Lite · POT% Tracker
+                24-Point Rating Engine · Market Flucs · Sectionals · POT% Tracker
               </p>
             </div>
           </div>
@@ -271,7 +268,7 @@ export default function App() {
 
       <footer className="border-t border-slate-900 py-5 text-center text-[11px] text-slate-500">
         <Database className="mr-1 inline h-3 w-3" />
-        100% Free Cloud Stack: Firebase Hosting &amp; Firestore (Spark) · GitHub Actions Cron · Zero-Key Public AU Racing, BOM &amp; Betfair BSP Feeds
+        TurfEdge AU · Quantitative Thoroughbred Ratings, Market Fluctuations &amp; Standardized Unit Ledger
       </footer>
     </div>
   );

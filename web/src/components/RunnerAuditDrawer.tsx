@@ -2,11 +2,11 @@ import type { AuditFactor, ScoredRunner } from '../lib/types';
 import { FACTOR_DEFINITIONS, NEUTRAL_SCORE, NO_DATA_LABEL } from '../lib/localScorer23pt';
 
 export function RunnerAuditDrawer({ runner }: { runner: ScoredRunner }) {
-  // Always surface all 23 factors cleanly, never omitting flat/neutral factors
+  // Always surface all 24 factors cleanly, never omitting flat/neutral factors
   const existingMap = new Map<string, AuditFactor>();
   (runner.audit_23pt || []).forEach((f) => existingMap.set(f.key, f));
 
-  const all23: AuditFactor[] = FACTOR_DEFINITIONS.map((def) => {
+  const all24: AuditFactor[] = FACTOR_DEFINITIONS.map((def) => {
     const found = existingMap.get(def.key);
     if (found) return found;
     return {
@@ -21,16 +21,16 @@ export function RunnerAuditDrawer({ runner }: { runner: ScoredRunner }) {
     };
   });
 
-  const categories = Array.from(new Set(all23.map((f) => f.category)));
-  const liveCount = all23.filter((f) => f.has_data).length;
-  const neutralCount = all23.length - liveCount;
+  const categories = Array.from(new Set(all24.map((f) => f.category)));
+  const liveCount = all24.filter((f) => f.has_data).length;
+  const neutralCount = all24.length - liveCount;
 
   return (
     <div className="border-t border-slate-800 bg-slate-950/90 p-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div>
           <h4 className="text-sm font-semibold text-slate-100">
-            23-Point Audit Breakdown — #{runner.runner_number} {runner.name}
+            24-Point Audit Breakdown — #{runner.runner_number} {runner.name}
           </h4>
           <p className="text-xs text-slate-400">
             Composite {runner.composite_score.toFixed(1)}/100 · Rated ${runner.rated_price.toFixed(2)} vs Live $
@@ -55,7 +55,7 @@ export function RunnerAuditDrawer({ runner }: { runner: ScoredRunner }) {
               {cat}
             </div>
             <div className="space-y-2.5">
-              {all23
+              {all24
                 .filter((f) => f.category === cat)
                 .map((f) => {
                   const pct = Math.min(100, Math.max(0, (f.score / 10) * 100));

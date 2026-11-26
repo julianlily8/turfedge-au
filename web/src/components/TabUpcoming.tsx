@@ -6,7 +6,6 @@ import {
   TrendingUp,
   TrendingDown,
   Minus,
-  Sparkles,
   Trophy,
   Layers,
   Upload,
@@ -317,13 +316,9 @@ export function TabUpcoming({
                     <span className="text-xs font-semibold text-slate-400">
                       {activeRace.meeting_name} ({activeRace.state}) · Race {activeRace.race_number}
                     </span>
-                    {activeRace.pre_jump_analyzed ? (
+                    {activeRace.pre_jump_analyzed || activeRace.baseline_analyzed ? (
                       <span className="inline-flex items-center gap-1 rounded-full bg-sky-500/15 px-2 py-0.5 text-[10px] font-semibold text-sky-300">
-                        <Sparkles className="h-3 w-3" /> {activeRace.ai_model || 'Pre-Jump Analyzed'}
-                      </span>
-                    ) : activeRace.baseline_analyzed ? (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-indigo-500/15 px-2 py-0.5 text-[10px] font-semibold text-indigo-300">
-                        <Sparkles className="h-3 w-3" /> Morning Gemini Baseline
+                        24-PT AUDITED
                       </span>
                     ) : ['final', 'closed', 'paying'].includes((activeRace.status || '').toLowerCase()) && !activeRace.settled ? (
                       <span
@@ -356,7 +351,7 @@ export function TabUpcoming({
               </div>
               {activeRace.ai_summary && (
                 <p className="mt-2 rounded-lg bg-slate-950/70 px-3 py-2 text-xs text-slate-300">
-                  <strong className="text-sky-300">Gemini Synthesis:</strong> {activeRace.ai_summary}
+                  <strong className="text-sky-300">Race Synthesis:</strong> {activeRace.ai_summary}
                 </p>
               )}
               {activeRace.results && activeRace.results.length > 0 && (
@@ -442,7 +437,7 @@ export function TabUpcoming({
                 <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
                   <FlucBadge direction={winSel.market_fluc.direction} pct={winSel.market_fluc.fluc_pct} />
                   <span className="text-xs text-slate-400 tabular-nums">
-                    23-Pt Score: <strong className="text-slate-100">{winSel.composite_score.toFixed(1)}</strong>/100
+                    24-Pt Score: <strong className="text-slate-100">{winSel.composite_score.toFixed(1)}</strong>/100
                   </span>
                 </div>
 
@@ -465,6 +460,13 @@ export function TabUpcoming({
                 <div className="space-y-2.5">
                   {(activeRace.srm_combos || []).map((srm) => {
                     if (srm.skipped) {
+                      const badge =
+                        srm.skip_badge ||
+                        (srm.skip_reason?.includes('< 5')
+                          ? 'SKIP · MIN FIELD 5'
+                          : srm.skip_reason?.includes('6+ runners')
+                          ? 'SKIP · MIN FIELD 6'
+                          : 'SKIP · LOW ODDS');
                       return (
                         <div
                           key={srm.leg_count}
@@ -473,7 +475,7 @@ export function TabUpcoming({
                           <div className="flex items-center justify-between gap-2">
                             <span className="text-xs font-semibold text-slate-400">{srm.label}</span>
                             <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-bold uppercase text-amber-300 ring-1 ring-amber-500/30">
-                              SKIP · LOW ODDS
+                              {badge}
                             </span>
                           </div>
                           <p className="mt-1 text-[11px] text-slate-500">
@@ -587,15 +589,15 @@ export function TabUpcoming({
             </div>
           </div>
 
-          {/* Ranked Top 10 & Full Field with Expandable 23-Point Audit */}
+          {/* Ranked Top 10 & Full Field with Expandable 24-Point Audit */}
           <div className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/70">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 px-4 py-3">
               <div>
                 <h3 className="text-sm font-bold text-white">
-                  Ranked Top 10 &amp; Full Field — Same Race Multi Probabilities &amp; 23-Point Audit
+                  Ranked Top 10 &amp; Full Field — Same Race Multi Probabilities &amp; 24-Point Audit
                 </h3>
                 <p className="text-xs text-slate-400">
-                  Click any runner row to inspect all 23 weighted factors (missing text fields are locked at neutral 5.0).
+                  Click any runner row to inspect all 24 weighted factors (missing text fields are locked at neutral 5.0).
                 </p>
               </div>
               <span className="text-xs text-slate-400">{activeRace.scored_runners.length} Active Runners</span>
@@ -608,7 +610,7 @@ export function TabUpcoming({
                     <th className="px-3 py-2.5">Rank</th>
                     <th className="px-3 py-2.5">Runner</th>
                     <th className="px-3 py-2.5">Jockey / Wt</th>
-                    <th className="px-3 py-2.5 text-right">23-Pt</th>
+                    <th className="px-3 py-2.5 text-right">24-Pt</th>
                     <th className="px-3 py-2.5 text-right">Rated</th>
                     <th className="px-3 py-2.5 text-right">Open → Live</th>
                     <th className="px-3 py-2.5">Fluc / Overlay</th>
