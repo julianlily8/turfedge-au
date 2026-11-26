@@ -267,8 +267,8 @@ export function getLedgerBetDetails(
     const stake = isVoid ? 0 : s.win_overlay.stake;
     items.push({
       betKey: 'win_overlay',
-      shortTag: 'Overlay',
-      label: 'Win (Value Overlay)',
+      shortTag: 'Overlay (Subset)',
+      label: 'Win (Value Overlay — Subset)',
       status: isVoid ? 'VOID' : s.win_overlay.won ? 'W' : 'L',
       stake,
       officialOdds: s.win_overlay.settled_odds > 0 ? s.win_overlay.settled_odds : null,

@@ -156,6 +156,65 @@ def compute_meeting_bias(settled_races: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def apply_progressive_meeting_bias(
+    race: Dict[str, Any],
+    earlier_finished_races: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Compute race's progressive intraday `meeting_bias` and update factor #4 (`current_meeting_bias`)
+    on every scored runner strictly from earlier finished races (`race_number < current_race_number`).
+    Race 1 (or any race with 0 earlier finished races) stays strictly neutral 5.0 / has_data=False.
+    Does NOT alter pre-race win_selection / pricing / bets (display & factor attribution only).
+    """
+    curr_num = int(race.get("race_number") or 0)
+    strictly_earlier = [
+        r
+        for r in earlier_finished_races
+        if int(r.get("race_number") or 0) < curr_num and (r.get("results") or [])
+    ]
+    bias = compute_meeting_bias(strictly_earlier)
+    race["meeting_bias"] = bias
+
+    scored_runners = race.get("scored_runners") or []
+    field_size = max(len(scored_runners), 1)
+
+    for runner in scored_runners:
+        barrier = int(runner.get("barrier") or 0)
+        barrier_pct = (barrier / field_size) if barrier > 0 else 0.5
+        sm_label = (runner.get("speedmap_label") or "").lower()
+        is_leader = any(k in sm_label for k in ("lead", "front"))
+        is_on_pace = is_leader or any(k in sm_label for k in ("pace", "handy", "mid-front"))
+        is_closer = any(k in sm_label for k in ("back", "rear", "tail"))
+
+        if bias["sample_size"] == 0:
+            mb_score = NEUTRAL_SCORE
+            mb_has_data = False
+            mb_reason = "No earlier settled races at this meeting yet."
+        else:
+            sc = 5.0
+            if bias["pace_bias"] == "On-Pace":
+                sc += 2.0 if is_on_pace else (-1.4 if is_closer else 0.0)
+            elif bias["pace_bias"] == "Swoopers":
+                sc += 2.0 if is_closer else (-1.4 if is_leader else 0.0)
+            if bias["barrier_bias"] == "Inside" and barrier_pct <= 0.4:
+                sc += 1.0
+            elif bias["barrier_bias"] == "Outside" and barrier_pct >= 0.6:
+                sc += 1.0
+            mb_score = clamp(sc)
+            mb_has_data = True
+            mb_reason = bias["summary"]
+
+        for factor in runner.get("audit_23pt") or []:
+            if factor.get("key") == "current_meeting_bias":
+                factor["score"] = round(mb_score, 2)
+                factor["has_data"] = mb_has_data
+                factor["reason"] = mb_reason
+                factor["weighted_points"] = round((mb_score / 10.0) * float(factor.get("weight") or 5.0), 3)
+                break
+
+    return bias
+
+
 def _parse_rail_meters(rail_position: str) -> float:
     m = re.search(r"\+?\s*(\d+(?:\.\d+)?)\s*m", (rail_position or "").lower())
     return float(m.group(1)) if m else 0.0

@@ -365,3 +365,48 @@ def test_youtube_xml_feed_discovery_and_runner_snippet_extraction():
     assert "finishing_position" not in clean["runners"][0]
     assert "margin" not in clean["runners"][0]
     assert clean["runners"][0]["form_comment"] == ""
+
+
+def test_progressive_bias_free_current_meeting_bias():
+    from pipeline.src.engine.scorer_23pt import apply_progressive_meeting_bias
+
+    track_meta = {"name": "Royal Randwick", "home_straight_m": 410, "turning": "Clockwise"}
+    weather = {"source": "BOM Hourly API", "headwind_kmh": 0.0, "wind_speed_kmh": 5.0, "rain_expected_mm": 0.0, "effect": "Calm"}
+
+    r1 = _sample_race(field_size=8)
+    r1["race_number"] = 1
+    r1["scored_runners"] = score_race_23pt(r1, track_meta, weather)
+    r1["results"] = [{"position": 1, "runner_number": 1, "barrier": 1, "name": "Runner 1"}]
+
+    r2 = _sample_race(field_size=8)
+    r2["race_number"] = 2
+    r2["scored_runners"] = score_race_23pt(r2, track_meta, weather)
+    r2["results"] = [{"position": 1, "runner_number": 2, "barrier": 2, "name": "Runner 2"}]
+
+    r3 = _sample_race(field_size=8)
+    r3["race_number"] = 3
+    r3["scored_runners"] = score_race_23pt(r3, track_meta, weather)
+    r3["results"] = [{"position": 1, "runner_number": 8, "barrier": 8, "name": "Runner 8"}]
+
+    # Race 1 must ignore R1, R2, R3 -> stays neutral 5.0 (sample_size=0)
+    b1 = apply_progressive_meeting_bias(r1, [r1, r2, r3])
+    assert b1["sample_size"] == 0
+    f4_r1 = next(a for a in r1["scored_runners"][0]["audit_23pt"] if a["key"] == "current_meeting_bias")
+    assert f4_r1["score"] == NEUTRAL_SCORE
+    assert f4_r1["has_data"] is False
+
+    # Race 2 must ONLY use Race 1 (sample_size=1)
+    b2 = apply_progressive_meeting_bias(r2, [r1, r2, r3])
+    assert b2["sample_size"] == 1
+
+    # Race 3 must ONLY use Race 1 & Race 2 (sample_size=2, never Race 3's own result!)
+    b3 = apply_progressive_meeting_bias(r3, [r1, r2, r3])
+    assert b3["sample_size"] == 2
+    assert b3["pace_bias"] == "On-Pace"
+    assert b3["barrier_bias"] == "Inside"
+    f4_r3_onpace = next(
+        a for r in r3["scored_runners"] if r["runner_number"] == 1
+        for a in r["audit_23pt"] if a["key"] == "current_meeting_bias"
+    )
+    assert f4_r3_onpace["has_data"] is True
+    assert f4_r3_onpace["score"] > 5.0

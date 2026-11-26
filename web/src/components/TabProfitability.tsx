@@ -734,9 +734,15 @@ export function TabProfitability({
                                 <span
                                   key={b.betKey}
                                   className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold ${pillStyle}`}
-                                  title={`${b.label}: ${b.comboText}${
-                                    isUnderStakeWin ? ` (Under-stake hit: returned $${b.effectiveReturn.toFixed(2)} on $${b.stake.toFixed(0)})` : ''
-                                  }`}
+                                  title={
+                                    b.betKey === 'win_overlay'
+                                      ? `Subset of Win bets meeting the Live > Rated value overlay threshold (not double-staked $10 in Row Net). ${b.comboText}`
+                                      : `${b.label}: ${b.comboText}${
+                                          isUnderStakeWin
+                                            ? ` (Under-stake hit: returned $${b.effectiveReturn.toFixed(2)} on $${b.stake.toFixed(0)})`
+                                            : ''
+                                        }`
+                                  }
                                 >
                                   <span>{b.shortTag}</span>
                                   <strong

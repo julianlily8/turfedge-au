@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
-from pipeline.src.engine.scorer_23pt import compute_meeting_bias
+from pipeline.src.engine.scorer_23pt import apply_progressive_meeting_bias, compute_meeting_bias
 from pipeline.src.engine.settlement import settle_meeting_quaddie, settle_race
 from pipeline.src.firestore_client import FirestoreStore
 from pipeline.src.http_client import PoliteHttpClient
@@ -200,22 +200,63 @@ def run_settlement_for_date(date_str: str, store: FirestoreStore, http: PoliteHt
 
         by_meeting[slug].append({**race, **race_update})
 
-    # Update live Current Meeting Track Bias and settle Meeting Quaddies
+    # Update progressive intraday meeting_bias per race (strictly race_number < current_race_number)
+    # and settle Meeting Quaddies
+    progressive_bias_updates = 0
     for slug, m_races in by_meeting.items():
         meeting_doc_id = f"{date_str}_{slug}"
         meeting = store.get_doc("meetings", meeting_doc_id)
+
+        m_races_sorted = sorted(m_races, key=lambda r: int(r.get("race_number") or 0))
+        finished_so_far: List[Dict[str, Any]] = []
+        now_bias_iso = datetime.now(timezone.utc).isoformat()
+
+        for r in m_races_sorted:
+            prev_sample = int((r.get("meeting_bias") or {}).get("sample_size") or 0)
+            expected_sample = len(finished_so_far)
+            if expected_sample > 0 and prev_sample != expected_sample:
+                updated_bias = apply_progressive_meeting_bias(r, finished_so_far)
+                race_bias_patch: Dict[str, Any] = {
+                    "meeting_bias": updated_bias,
+                    "scored_runners": r.get("scored_runners") or [],
+                    "updated_at": now_bias_iso,
+                }
+                # Keep top_runner_factor_scores in sync for Tab 2 Factor Attribution (never alters picks/P&L)
+                top_runner = (r.get("scored_runners") or [None])[0]
+                if r.get("settled") and top_runner:
+                    f_scores = {
+                        a["key"]: a["score"]
+                        for a in (top_runner.get("audit_23pt") or [])
+                        if a.get("has_data")
+                    }
+                    existing_s = r.get("settlement") or store.get_doc("settlements", r["race_id"])
+                    if isinstance(existing_s, dict) and existing_s.get("settlement_id"):
+                        existing_s["top_runner_factor_scores"] = f_scores
+                        race_bias_patch["settlement"] = existing_s
+                        store.set_doc(
+                            "settlements",
+                            existing_s["settlement_id"],
+                            {"top_runner_factor_scores": f_scores},
+                            merge=True,
+                        )
+                store.set_doc("races", r["race_id"], race_bias_patch, merge=True)
+                progressive_bias_updates += 1
+
+            if r.get("results"):
+                finished_so_far.append(r)
+
         if not meeting:
             continue
 
-        settled_m_races = [r for r in m_races if r.get("results")]
+        settled_m_races = [r for r in m_races_sorted if r.get("results")]
         meeting_bias = compute_meeting_bias(settled_m_races)
         # Include any leg that completed pre-jump OR morning Gemini baseline analysis
-        analyzed_m_races = [r for r in m_races if r.get("pre_jump_analyzed") or r.get("baseline_analyzed")]
+        analyzed_m_races = [r for r in m_races_sorted if r.get("pre_jump_analyzed") or r.get("baseline_analyzed")]
         quaddie_settlement = settle_meeting_quaddie(meeting, analyzed_m_races)
 
         update_m: Dict[str, Any] = {
             "meeting_bias": meeting_bias,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": now_bias_iso,
         }
         if quaddie_settlement:
             quaddie_settlement["settled_at"] = update_m["updated_at"]
@@ -225,9 +266,10 @@ def run_settlement_for_date(date_str: str, store: FirestoreStore, http: PoliteHt
         store.set_doc("meetings", meeting_doc_id, update_m, merge=True)
 
     logger.info(
-        "Post-race settlement finished for %s (%d race(s) settled/enriched, %d historical result(s) backfilled, %d non-analyzed baseline settlement(s) cleaned).",
+        "Post-race settlement finished for %s (%d race(s) settled/enriched, %d progressive bias update(s), %d historical result(s) backfilled, %d non-analyzed baseline settlement(s) cleaned).",
         date_str,
         settled_updates,
+        progressive_bias_updates,
         backfilled_results,
         cleaned_baseline,
     )

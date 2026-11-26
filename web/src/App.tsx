@@ -242,25 +242,30 @@ export default function App() {
         </div>
       )}
 
-      {/* Main Content */}
+      {/* Main Content — strictly conditional mount so Recharts SVG nodes unmount completely on Tab 1 */}
       <main className="mx-auto max-w-7xl px-4 py-6">
-        {activeTab === 'upcoming' ? (
-          <TabUpcoming
-            dates={dates}
-            selectedDate={selectedDate}
-            onDateChange={setSelectedDate}
-            meetings={meetings}
-            races={combinedRaces}
-            onManualRaceAdded={(r) => setManualRaces((prev) => [r, ...prev])}
-          />
-        ) : (
-          <TabProfitability
-            settlements={settlements}
-            auditMeetings={auditMeetings}
-            auditRaces={auditRaces}
-            selectedDate={selectedDate}
-            loading={loadingSettlements}
-          />
+        {activeTab === 'upcoming' && (
+          <div key="tab-upcoming">
+            <TabUpcoming
+              dates={dates}
+              selectedDate={selectedDate}
+              onDateChange={setSelectedDate}
+              meetings={meetings}
+              races={combinedRaces}
+              onManualRaceAdded={(r) => setManualRaces((prev) => [r, ...prev])}
+            />
+          </div>
+        )}
+        {activeTab === 'profitability' && (
+          <div key="tab-profitability">
+            <TabProfitability
+              settlements={settlements}
+              auditMeetings={auditMeetings}
+              auditRaces={auditRaces}
+              selectedDate={selectedDate}
+              loading={loadingSettlements}
+            />
+          </div>
         )}
       </main>
 
