@@ -233,6 +233,7 @@ class LadbrokesSource:
                     "flucs": flucs,
                     "speedmap_label": (speedmap.get("label") or "").strip(),
                     "settling_lengths": _safe_float(speedmap.get("settling_lengths"), -1.0),
+                    "settling_position": int(_safe_float(speedmap.get("settling_position") or speedmap.get("position"), 0)),
                     "form_comment": form_comment,
                     "form_indicators": form_indicators,
                     "stewards_notes": stewards_notes,

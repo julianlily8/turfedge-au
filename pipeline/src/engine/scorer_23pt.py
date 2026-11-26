@@ -97,6 +97,155 @@ def compute_market_fluc(opening_win: float, live_win: float) -> Dict[str, Any]:
     }
 
 
+def _extract_runner_speedmap_fields(runner: Dict[str, Any]) -> Tuple[str, Optional[float]]:
+    """Read running-style label and numeric settling_position across all Ladbrokes speedmap keys."""
+    if not isinstance(runner, dict):
+        return "", None
+
+    label = ""
+    settling_pos: Optional[float] = None
+
+    nested_sm = runner.get("speedmap")
+    if isinstance(nested_sm, dict):
+        label = str(nested_sm.get("label") or nested_sm.get("pace_style") or nested_sm.get("running_style") or "").strip()
+        raw_sp = nested_sm.get("settling_position") or nested_sm.get("position")
+        if raw_sp is not None and raw_sp != "":
+            try:
+                val = float(raw_sp)
+                if val > 0:
+                    settling_pos = val
+            except (TypeError, ValueError):
+                pass
+    elif isinstance(nested_sm, str) and nested_sm.strip():
+        label = nested_sm.strip()
+
+    for key in ("speedmap_label", "pace_style", "running_style"):
+        val = runner.get(key)
+        if isinstance(val, str) and val.strip():
+            label = val.strip()
+            break
+
+    if settling_pos is None:
+        raw_sp = runner.get("settling_position")
+        if raw_sp is not None and raw_sp != "":
+            try:
+                val = float(raw_sp)
+                if val > 0:
+                    settling_pos = val
+            except (TypeError, ValueError):
+                pass
+
+    return label, settling_pos
+
+
+def classify_runner_pace_style(runner: Dict[str, Any]) -> str:
+    """
+    Normalize Ladbrokes running-style labels and numeric settling_position into:
+      - 'on_pace': leader, pace, on pace, on-pace, off pace, off-pace, handy, front, mid-front (or settling_position <= 3)
+      - 'closer':  backmarker, off midfield, off-midfield, closer, rear, tail, back (or settling_position >= 6)
+      - 'neutral': midfield (or unknown / settling_position 4..5)
+    """
+    label, settling_pos = _extract_runner_speedmap_fields(runner)
+    norm = re.sub(r"\s+", " ", label.lower().strip())
+
+    if norm:
+        # Check 'off midfield' / 'off-midfield' BEFORE 'midfield' so it classifies as closer
+        if norm in ("backmarker", "off midfield", "off-midfield", "closer", "rear", "tail", "back") or any(
+            k in norm for k in ("backmarker", "off midfield", "off-midfield", "closer", "rear", "tail", "back")
+        ):
+            return "closer"
+        if norm in ("leader", "pace", "on pace", "on-pace", "off pace", "off-pace", "handy", "front", "mid-front") or any(
+            k in norm for k in ("lead", "pace", "handy", "front")
+        ):
+            return "on_pace"
+        if "midfield" in norm or norm == "mid":
+            return "neutral"
+
+    if settling_pos is not None:
+        if settling_pos <= 3:
+            return "on_pace"
+        if settling_pos >= 6:
+            return "closer"
+
+    return "neutral"
+
+
+def _is_leader_runner(runner: Dict[str, Any]) -> bool:
+    label, settling_pos = _extract_runner_speedmap_fields(runner)
+    norm = label.lower().strip()
+    if any(k in norm for k in ("lead", "front")):
+        return True
+    if not norm and settling_pos is not None and settling_pos <= 1.5:
+        return True
+    return False
+
+
+def _resolve_race_winner(race: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], int]:
+    """
+    Resolve (winner_result_meta, winner_runner_obj, active_field_size) from a finished race document,
+    handling both pre-score (`runners`) and Firestore persisted (`scored_runners`) layouts.
+    """
+    all_runners = race.get("scored_runners") or race.get("runners") or []
+    active_runners = [r for r in all_runners if isinstance(r, dict) and not r.get("is_scratched")]
+    field_sz = max(len(active_runners), len(all_runners), 1)
+
+    results = race.get("results") or []
+    winner_meta: Optional[Dict[str, Any]] = None
+    win_num: Optional[int] = None
+    win_entrant_id = ""
+
+    if results:
+        winner_meta = next((res for res in results if isinstance(res, dict) and int(res.get("position") or 0) == 1), None)
+        if winner_meta is None and isinstance(results[0], dict):
+            winner_meta = results[0]
+        if winner_meta:
+            raw_num = winner_meta.get("runner_number")
+            if raw_num is not None and str(raw_num).strip() != "":
+                try:
+                    win_num = int(raw_num)
+                except (TypeError, ValueError):
+                    win_num = None
+            win_entrant_id = str(winner_meta.get("entrant_id") or "").strip()
+
+    if win_num is None:
+        top4 = race.get("official_top4") or []
+        if top4:
+            first = top4[0]
+            if isinstance(first, dict):
+                winner_meta = winner_meta or first
+                raw_num = first.get("runner_number")
+                if raw_num is not None:
+                    try:
+                        win_num = int(raw_num)
+                    except (TypeError, ValueError):
+                        win_num = None
+            else:
+                try:
+                    win_num = int(first)
+                except (TypeError, ValueError):
+                    win_num = None
+
+    win_runner: Optional[Dict[str, Any]] = None
+    if win_num is not None:
+        win_runner = next((r for r in all_runners if isinstance(r, dict) and int(r.get("runner_number") or 0) == win_num), None)
+    if win_runner is None and win_entrant_id:
+        win_runner = next((r for r in all_runners if isinstance(r, dict) and str(r.get("entrant_id") or "").strip() == win_entrant_id), None)
+    if win_runner is None:
+        win_runner = next(
+            (r for r in all_runners if isinstance(r, dict) and int(r.get("finishing_position") or r.get("position") or 0) == 1),
+            None,
+        )
+
+    if winner_meta is None and win_runner is not None:
+        winner_meta = {
+            "runner_number": win_runner.get("runner_number"),
+            "barrier": win_runner.get("barrier"),
+            "position": 1,
+        }
+
+    return winner_meta, win_runner, field_sz
+
+
 def compute_meeting_bias(settled_races: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Infer live current-meeting track bias from earlier finalized races at the same venue."""
     if not settled_races:
@@ -104,37 +253,57 @@ def compute_meeting_bias(settled_races: List[Dict[str, Any]]) -> Dict[str, Any]:
             "sample_size": 0,
             "pace_bias": "Neutral",
             "barrier_bias": "Neutral",
+            "on_pace_wins": 0,
+            "closer_wins": 0,
+            "neutral_wins": 0,
+            "inside_wins": 0,
+            "outside_wins": 0,
             "summary": "No earlier settled races yet today.",
         }
 
     on_pace_wins = 0
     closer_wins = 0
+    neutral_wins = 0
     inside_wins = 0
     outside_wins = 0
+    valid_races = 0
 
     for race in settled_races:
-        results = race.get("results") or []
-        if not results:
+        winner_meta, win_runner, field_sz = _resolve_race_winner(race)
+        if winner_meta is None and win_runner is None:
             continue
-        winner = results[0]
-        win_num = winner.get("runner_number")
-        win_bar = int(winner.get("barrier") or 0)
-        runners = [r for r in (race.get("runners") or []) if not r.get("is_scratched")]
-        field_sz = max(len(runners), 1)
+        valid_races += 1
+
+        win_bar = int((winner_meta or {}).get("barrier") or (win_runner or {}).get("barrier") or 0)
         if win_bar > 0:
             if win_bar <= max(3, field_sz // 3):
                 inside_wins += 1
             elif win_bar >= max(6, int(field_sz * 0.65)):
                 outside_wins += 1
-        win_runner = next((r for r in runners if r.get("runner_number") == win_num), None)
-        if win_runner:
-            sm = (win_runner.get("speedmap_label") or "").lower()
-            if any(k in sm for k in ("lead", "pace", "handy", "front")):
-                on_pace_wins += 1
-            elif any(k in sm for k in ("back", "rear", "tail")):
-                closer_wins += 1
 
-    n = len(settled_races)
+        style_source = win_runner if win_runner is not None else (winner_meta or {})
+        pace_bucket = classify_runner_pace_style(style_source)
+        if pace_bucket == "on_pace":
+            on_pace_wins += 1
+        elif pace_bucket == "closer":
+            closer_wins += 1
+        else:
+            neutral_wins += 1
+
+    if valid_races == 0:
+        return {
+            "sample_size": 0,
+            "pace_bias": "Neutral",
+            "barrier_bias": "Neutral",
+            "on_pace_wins": 0,
+            "closer_wins": 0,
+            "neutral_wins": 0,
+            "inside_wins": 0,
+            "outside_wins": 0,
+            "summary": "No earlier settled races yet today.",
+        }
+
+    n = valid_races
     if on_pace_wins >= max(2, int(n * 0.6)):
         pace_bias = "On-Pace"
     elif closer_wins >= max(2, int(n * 0.6)):
@@ -154,6 +323,11 @@ def compute_meeting_bias(settled_races: List[Dict[str, Any]]) -> Dict[str, Any]:
         "sample_size": n,
         "pace_bias": pace_bias,
         "barrier_bias": barrier_bias,
+        "on_pace_wins": on_pace_wins,
+        "closer_wins": closer_wins,
+        "neutral_wins": neutral_wins,
+        "inside_wins": inside_wins,
+        "outside_wins": outside_wins,
         "summary": summary,
     }
 
@@ -172,7 +346,16 @@ def apply_progressive_meeting_bias(
     strictly_earlier = [
         r
         for r in earlier_finished_races
-        if int(r.get("race_number") or 0) < curr_num and (r.get("results") or [])
+        if int(r.get("race_number") or 0) < curr_num
+        and (
+            bool(r.get("results"))
+            or bool(r.get("official_top4"))
+            or any(
+                int(run.get("finishing_position") or 0) == 1
+                for run in (r.get("scored_runners") or r.get("runners") or [])
+                if isinstance(run, dict)
+            )
+        )
     ]
     bias = compute_meeting_bias(strictly_earlier)
     race["meeting_bias"] = bias
@@ -183,10 +366,10 @@ def apply_progressive_meeting_bias(
     for runner in scored_runners:
         barrier = int(runner.get("barrier") or 0)
         barrier_pct = (barrier / field_size) if barrier > 0 else 0.5
-        sm_label = (runner.get("speedmap_label") or "").lower()
-        is_leader = any(k in sm_label for k in ("lead", "front"))
-        is_on_pace = is_leader or any(k in sm_label for k in ("pace", "handy", "mid-front"))
-        is_closer = any(k in sm_label for k in ("back", "rear", "tail"))
+        pace_bucket = classify_runner_pace_style(runner)
+        is_leader = _is_leader_runner(runner)
+        is_on_pace = pace_bucket == "on_pace"
+        is_closer = pace_bucket == "closer"
 
         if bias["sample_size"] == 0:
             mb_score = NEUTRAL_SCORE
@@ -350,9 +533,10 @@ def score_race_23pt(
         barrier = int(r.get("barrier") or 0)
         barrier_pct = (barrier / max(field_size, 1)) if barrier > 0 else 0.5
         sm_label = (r.get("speedmap_label") or "").lower()
-        is_leader = any(k in sm_label for k in ("lead", "front"))
-        is_on_pace = is_leader or any(k in sm_label for k in ("pace", "handy", "mid-front"))
-        is_closer = any(k in sm_label for k in ("back", "rear", "tail"))
+        pace_bucket = classify_runner_pace_style(r)
+        is_leader = _is_leader_runner(r)
+        is_on_pace = pace_bucket == "on_pace"
+        is_closer = pace_bucket == "closer"
         sire_l = (r.get("sire") or "").lower()
         jockey_l = (r.get("jockey") or "").lower()
         trainer_l = (r.get("trainer") or "").lower()

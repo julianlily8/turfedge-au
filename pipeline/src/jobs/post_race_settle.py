@@ -212,9 +212,12 @@ def run_settlement_for_date(date_str: str, store: FirestoreStore, http: PoliteHt
         now_bias_iso = datetime.now(timezone.utc).isoformat()
 
         for r in m_races_sorted:
-            prev_sample = int((r.get("meeting_bias") or {}).get("sample_size") or 0)
-            expected_sample = len(finished_so_far)
-            if expected_sample > 0 and prev_sample != expected_sample:
+            prev_bias = r.get("meeting_bias") or {}
+            prev_sample = int(prev_bias.get("sample_size") or 0)
+            prev_summary = str(prev_bias.get("summary") or "")
+            expected_bias = compute_meeting_bias(finished_so_far)
+            expected_sample = int(expected_bias.get("sample_size") or 0)
+            if expected_sample > 0 and (prev_sample != expected_sample or prev_summary != expected_bias.get("summary")):
                 updated_bias = apply_progressive_meeting_bias(r, finished_so_far)
                 race_bias_patch: Dict[str, Any] = {
                     "meeting_bias": updated_bias,

@@ -572,3 +572,93 @@ def test_youtube_media_description_fallback_when_captions_ip_blocked(monkeypatch
     f23_r3_after = next(a for r in race["scored_runners"] if r["runner_number"] == 3 for a in r["audit_23pt"] if a["key"] == "youtube_transcripts")
     assert f23_r1_after["score"] > 7.0
     assert f23_r3_after["score"] == NEUTRAL_SCORE
+
+
+def test_meeting_bias_pace_style_normalization_and_progressive_shifts():
+    from pipeline.src.engine.scorer_23pt import (
+        apply_progressive_meeting_bias,
+        classify_runner_pace_style,
+        compute_meeting_bias,
+    )
+
+    # Verify all 6 Ladbrokes labels + nested speedmap + numeric settling_position
+    assert classify_runner_pace_style({"speedmap_label": "Leader"}) == "on_pace"
+    assert classify_runner_pace_style({"speedmap_label": "Pace"}) == "on_pace"
+    assert classify_runner_pace_style({"speedmap_label": "Off Pace"}) == "on_pace"
+    assert classify_runner_pace_style({"speedmap_label": "Midfield"}) == "neutral"
+    assert classify_runner_pace_style({"speedmap_label": "Off Midfield"}) == "closer"
+    assert classify_runner_pace_style({"speedmap_label": "Backmarker"}) == "closer"
+    assert classify_runner_pace_style({"speedmap": {"label": "Off-Midfield"}}) == "closer"
+    assert classify_runner_pace_style({"pace_style": "On-Pace"}) == "on_pace"
+    assert classify_runner_pace_style({"settling_position": 2}) == "on_pace"
+    assert classify_runner_pace_style({"settling_position": 7}) == "closer"
+    assert classify_runner_pace_style({"settling_position": 5}) == "neutral"
+
+    # Build 5 Firestore-style settled races (using `scored_runners` only, NO `runners` key!)
+    def _mk_settled_race(rnum: int, win_label: str, win_bar: int, mode: str = "results"):
+        runners = [
+            {"runner_number": i, "barrier": i, "name": f"H{rnum}_{i}", "speedmap_label": win_label if i == 1 else "Midfield", "is_scratched": False}
+            for i in range(1, 10)
+        ]
+        runners[0]["barrier"] = win_bar
+        doc = {"race_number": rnum, "scored_runners": runners}
+        if mode == "results":
+            doc["results"] = [{"position": 1, "runner_number": 1, "barrier": win_bar, "name": f"H{rnum}_1"}]
+        elif mode == "official_top4":
+            doc["official_top4"] = [1, 2, 3, 4]
+        elif mode == "finishing_position":
+            runners[0]["finishing_position"] = 1
+        return doc
+
+    r1 = _mk_settled_race(1, "Leader", 1, mode="results")
+    r2 = _mk_settled_race(2, "Off Pace", 2, mode="official_top4")
+    r3 = _mk_settled_race(3, "Midfield", 5, mode="finishing_position")
+    r4 = _mk_settled_race(4, "Off Midfield", 8, mode="results")
+    r5 = _mk_settled_race(5, "Backmarker", 9, mode="results")
+
+    mixed_bias = compute_meeting_bias([r1, r2, r3, r4, r5])
+    assert mixed_bias["sample_size"] == 5
+    assert mixed_bias["on_pace_wins"] == 2
+    assert mixed_bias["closer_wins"] == 2
+    assert mixed_bias["neutral_wins"] == 1
+    assert "(2 on-pace / 2 closers)" in mixed_bias["summary"]
+    assert "(2 inside / 2 wide)" in mixed_bias["summary"]
+
+    # After 2 on-pace inside winners (Leader + Off Pace), R3 must detect On-Pace + Inside bias
+    on_pace_bias = compute_meeting_bias([r1, r2])
+    assert on_pace_bias["pace_bias"] == "On-Pace"
+    assert on_pace_bias["barrier_bias"] == "Inside"
+    assert "(2 on-pace / 0 closers)" in on_pace_bias["summary"]
+
+    # Verify progressive Factor #4 score shifts on R3 runners (Off Pace boosted, Off Midfield penalized)
+    track_meta = {"name": "Hawkesbury", "home_straight_m": 380, "turning": "Clockwise"}
+    weather = {"source": "BOM Hourly API", "headwind_kmh": 0.0, "wind_speed_kmh": 5.0, "rain_expected_mm": 0.0, "effect": "Calm"}
+    next_race = _sample_race(field_size=8)
+    next_race["race_number"] = 3
+    next_race["runners"][0]["speedmap_label"] = "Off Pace"
+    next_race["runners"][0]["barrier"] = 1
+    next_race["runners"][1]["speedmap_label"] = "Off Midfield"
+    next_race["runners"][1]["barrier"] = 7
+    next_race["runners"][2]["speedmap_label"] = "Midfield"
+    next_race["runners"][2]["barrier"] = 5
+
+    next_race["scored_runners"] = score_race_23pt(next_race, track_meta, weather, meeting_bias=on_pace_bias)
+    f4_off_pace = next(a for r in next_race["scored_runners"] if r["runner_number"] == 1 for a in r["audit_23pt"] if a["key"] == "current_meeting_bias")
+    f4_off_mid = next(a for r in next_race["scored_runners"] if r["runner_number"] == 2 for a in r["audit_23pt"] if a["key"] == "current_meeting_bias")
+    f4_mid = next(a for r in next_race["scored_runners"] if r["runner_number"] == 3 for a in r["audit_23pt"] if a["key"] == "current_meeting_bias")
+    assert f4_off_pace["has_data"] is True and f4_off_pace["score"] == 8.0  # +2.0 On-Pace +1.0 Inside
+    assert f4_off_mid["has_data"] is True and f4_off_mid["score"] == 3.6   # -1.4 Closer penalty
+    assert f4_mid["has_data"] is True and f4_mid["score"] == 5.0           # Neutral Midfield
+
+    # Verify Swoopers bias (Off Midfield + Backmarker) boosts Off Midfield and penalizes Leader
+    r_sw1 = _mk_settled_race(1, "Off Midfield", 8)
+    r_sw2 = _mk_settled_race(2, "Backmarker", 9)
+    next_race["runners"][0]["speedmap_label"] = "Leader"
+    next_race["scored_runners"] = score_race_23pt(next_race, track_meta, weather)
+    sw_bias = apply_progressive_meeting_bias(next_race, [r_sw1, r_sw2])
+    assert sw_bias["pace_bias"] == "Swoopers"
+    assert sw_bias["closer_wins"] == 2
+    f4_lead_sw = next(a for r in next_race["scored_runners"] if r["runner_number"] == 1 for a in r["audit_23pt"] if a["key"] == "current_meeting_bias")
+    f4_close_sw = next(a for r in next_race["scored_runners"] if r["runner_number"] == 2 for a in r["audit_23pt"] if a["key"] == "current_meeting_bias")
+    assert f4_close_sw["score"] == 8.0  # +2.0 Swoopers +1.0 Outside
+    assert f4_lead_sw["score"] == 3.6   # -1.4 Leader penalty

@@ -120,19 +120,24 @@ def run_blind_two_phase_rebuild(
         logger.info("Phase A — %s (%s, %s): %d races", meeting["display_name"], meeting["state"], meeting["tier"], len(meeting["races"]))
 
         weather = weather_src.fetch_track_weather(meeting["track_meta"])
-        # Force neutral 5.0 meeting bias so later races cannot leak bias into earlier races
-        neutral_bias = compute_meeting_bias([])
         manual_yt_urls = load_configured_youtube_urls(date_str, slug, firestore_config=yt_fs_config)
 
         blind_events: List[Dict[str, Any]] = []
+        official_after_lock: Dict[str, Dict[str, Any]] = {}
         summary_map: Dict[str, Dict[str, Any]] = {}
         rail_position = "True"
 
-        for r_summary in meeting["races"]:
+        for r_summary in sorted(meeting["races"], key=lambda x: int(x.get("race_number") or 0)):
             race_id = r_summary["race_id"]
             if not race_id:
                 continue
             raw_ev = ladbrokes.fetch_race_event(race_id)
+            # Keep official post-race results strictly isolated until AFTER Race N's picks are locked
+            official_after_lock[race_id] = {
+                "results": raw_ev.get("results") or [],
+                "dividends": raw_ev.get("dividends") or {},
+                "status": raw_ev.get("status") or "Final",
+            }
             ev = scrub_event_blind(raw_ev)
 
             rail_position = ev.get("rail_position") or rail_position
@@ -145,6 +150,8 @@ def run_blind_two_phase_rebuild(
             ev["track_meta"] = meeting["track_meta"]
             summary_map[race_id] = r_summary
             blind_events.append(ev)
+
+        blind_events.sort(key=lambda x: int(x.get("race_number") or 0))
 
         all_runner_names = [
             r.get("name") or ""
@@ -168,7 +175,22 @@ def run_blind_two_phase_rebuild(
             runner_names=all_runner_names,
         )
 
+        # Sequential Race-by-Race (R1 -> RN) Blind Selection & Progressive Track Bias Loop:
+        # Race N sees ONLY already-completed races 1..(N-1) at this venue (R1 starts at neutral 5.0).
+        completed_for_bias: List[Dict[str, Any]] = []
+        meeting_races: List[Dict[str, Any]] = []
+        gemini_updated_total = 0
+        last_gemini_model = None
+
         for ev in blind_events:
+            race_id = ev["race_id"]
+            race_num = int(ev.get("race_number") or 0)
+            r_summary = summary_map.get(race_id, {})
+
+            # 1) Progressive current_meeting_bias strictly from completed races 1..(N-1)
+            progressive_bias = compute_meeting_bias(completed_for_bias)
+
+            # 2) Attach pre-race zero-key enrichments and run 23-point baseline scoring on scrubbed Race N
             attach_enrichment_to_runners(
                 ev.get("runners") or [],
                 trials_by_horse=nsw_trials_by_horse,
@@ -180,25 +202,24 @@ def run_blind_two_phase_rebuild(
                 ev,
                 meeting["track_meta"],
                 weather,
-                meeting_bias=neutral_bias,
+                meeting_bias=progressive_bias,
                 youtube_transcript=yt_transcript,
             )
 
-        ai_meta = gemini.analyze_meeting_batch(
-            meeting_name=meeting["display_name"],
-            weather=weather,
-            meeting_bias=neutral_bias,
-            races=blind_events,
-            youtube_transcript=yt_transcript,
-        )
-        logger.info("Phase A Gemini batch for %s: %s", meeting["display_name"], ai_meta)
+            # 3) Run Gemini strictly on scrubbed Race N + progressive_bias from 1..(N-1)
+            ai_meta = gemini.analyze_meeting_batch(
+                meeting_name=meeting["display_name"],
+                weather=weather,
+                meeting_bias=progressive_bias,
+                races=[ev],
+                youtube_transcript=yt_transcript,
+            )
+            gemini_updated_total += int(ai_meta.get("races_updated") or 0)
+            if ai_meta.get("model"):
+                last_gemini_model = ai_meta["model"]
 
-        meeting_races: List[Dict[str, Any]] = []
-        for ev in blind_events:
-            race_id = ev["race_id"]
-            r_summary = summary_map.get(race_id, {})
+            # 4) Price Race N (including Harville / field-size / short-fav exotic payout gates) & LOCK in Firestore
             pricing = price_and_generate_bets(ev)
-
             for ek in ("exacta", "trifecta", "first4"):
                 ex = (pricing.get("exotics") or {}).get(ek)
                 if ex:
@@ -215,7 +236,7 @@ def run_blind_two_phase_rebuild(
                 "meeting_name": meeting["display_name"],
                 "state": meeting["state"],
                 "tier": meeting["tier"],
-                "race_number": ev["race_number"],
+                "race_number": race_num,
                 "name": ev["name"],
                 "status": "Open",
                 "advertised_start": ev["advertised_start"] or r_summary.get("start_time") or "",
@@ -227,7 +248,7 @@ def run_blind_two_phase_rebuild(
                 "track_direction": ev["track_direction"] or meeting["track_meta"].get("turning"),
                 "track_home_straight": ev["track_home_straight"] or meeting["track_meta"].get("home_straight_m"),
                 "weather": weather,
-                "meeting_bias": neutral_bias,
+                "meeting_bias": progressive_bias,
                 "race_comment": "",
                 "prize_money": ev["prize_money"],
                 "positions_paid": ev["positions_paid"],
@@ -255,6 +276,37 @@ def run_blind_two_phase_rebuild(
             meeting_races.append(race_doc)
             total_races_locked += 1
 
+            logger.info(
+                "Locked %s R%d (prior bias sample=%d: %s) -> #1 %s",
+                meeting["display_name"],
+                race_num,
+                progressive_bias["sample_size"],
+                progressive_bias["summary"],
+                (pricing.get("win_selection") or {}).get("name", "?"),
+            )
+
+            # 5) ONLY AFTER Race N's selections are locked in Firestore, attach Race N's official
+            #    finishing order to completed_for_bias so it informs Race N+1 with zero hindsight bias.
+            off = official_after_lock.get(race_id) or {}
+            if off.get("results"):
+                completed_for_bias.append(
+                    {
+                        "race_id": race_id,
+                        "race_number": race_num,
+                        "scored_runners": ev["scored_runners"],
+                        "results": off["results"],
+                    }
+                )
+
+        logger.info(
+            "Phase A sequential Gemini complete for %s: model=%s, races_updated=%d/%d | Final day bias: %s",
+            meeting["display_name"],
+            last_gemini_model,
+            gemini_updated_total,
+            len(blind_events),
+            compute_meeting_bias(completed_for_bias)["summary"],
+        )
+
         quaddie_ticket = build_meeting_quaddie(meeting, meeting_races)
         meeting_doc = {
             "meeting_id": meeting["meeting_id"],
@@ -271,7 +323,7 @@ def run_blind_two_phase_rebuild(
             "quaddie_ticket": quaddie_ticket,
             "weather": weather,
             "track_meta": meeting["track_meta"],
-            "meeting_bias": neutral_bias,
+            "meeting_bias": compute_meeting_bias(completed_for_bias),
             "race_count": len(meeting_races),
             "race_ids": [r["race_id"] for r in meeting_races],
             "blind_rebuild": True,

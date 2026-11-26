@@ -117,9 +117,12 @@ def run_pre_jump_analysis(date_str: str, dry_run: bool = False, force_all: bool 
         weather = meeting.get("weather") or {}
         meeting_name = meeting.get("display_name") or pending_races[0].get("meeting_name") or slug
 
-        # Compute live Current Meeting Track Bias from any earlier finalized races at this venue today
+        # Compute live Current Meeting Track Bias from any earlier finalized/settled races at this venue today
         earlier_settled = [
-            r for r in all_by_meeting[slug] if (r.get("results") or []) and (r.get("status") or "").lower() in ("final", "paying")
+            r
+            for r in all_by_meeting[slug]
+            if (r.get("results") or r.get("official_top4"))
+            and (r.get("status") or "").lower() in ("final", "paying", "settled", "closed")
         ]
         meeting_bias = compute_meeting_bias(earlier_settled)
 
@@ -131,21 +134,40 @@ def run_pre_jump_analysis(date_str: str, dry_run: bool = False, force_all: bool 
         yt_transcript = fetch_transcripts_for_urls(yt_urls) if yt_urls else ""
 
         logger.info(
-            "Pre-jump batch for %s: %d race(s) in T-5..T-60m window (YT URLs: %d, earlier bias sample: %d)",
+            "Pre-jump batch for %s: %d race(s) in T-%.0fm..T-%.0fm window (YT URLs: %d, earlier bias sample: %d — %s)",
             meeting_name,
             len(pending_races),
+            WINDOW_MIN_MINUTES,
+            WINDOW_MAX_MINUTES,
             len(yt_urls),
             meeting_bias["sample_size"],
+            meeting_bias["summary"],
         )
 
         refreshed_races: List[Dict[str, Any]] = []
+        race_bias_by_id: Dict[str, Dict[str, Any]] = {}
+        enrichment_keys = (
+            "trial_runs",
+            "stewards_notes",
+            "vet_notes",
+            "vet_clean_notes",
+            "stewards_trial_notes",
+            "blog_notes",
+            "nsw_freefields_checked",
+        )
         for race in sorted(pending_races, key=lambda x: int(x.get("race_number") or 0)):
             race_id = race["race_id"]
-            # Preserve morning opening odds snapshot
-            open_map = {
-                int(r["runner_number"]): float(r.get("opening_win") or 0.0)
+            curr_num = int(race.get("race_number") or 0)
+            # Strictly earlier finished races at this venue (race_number < current_race_number)
+            strictly_earlier = [r for r in earlier_settled if int(r.get("race_number") or 0) < curr_num]
+            race_bias = compute_meeting_bias(strictly_earlier)
+            race_bias_by_id[race_id] = race_bias
+
+            # Preserve morning opening odds snapshot and zero-key enrichments (NSW FreeFields / blog)
+            prior_by_num = {
+                int(r["runner_number"]): r
                 for r in (race.get("scored_runners") or [])
-                if float(r.get("opening_win") or 0.0) > 1.0
+                if r.get("runner_number") is not None
             }
 
             try:
@@ -156,10 +178,15 @@ def run_pre_jump_analysis(date_str: str, dry_run: bool = False, force_all: bool 
 
             for runner in live_ev["runners"]:
                 rn = int(runner["runner_number"])
-                if rn in open_map:
-                    runner["opening_win"] = open_map[rn]
+                prior = prior_by_num.get(rn) or {}
+                prior_open = float(prior.get("opening_win") or 0.0)
+                if prior_open > 1.0:
+                    runner["opening_win"] = prior_open
                 elif runner["opening_win"] <= 1.0 and runner["live_win"] > 1.0:
                     runner["opening_win"] = runner["live_win"]
+                for ek in enrichment_keys:
+                    if prior.get(ek) and not runner.get(ek):
+                        runner[ek] = prior[ek]
 
             live_ev["date"] = date_str
             live_ev["meeting_slug"] = slug
@@ -171,7 +198,7 @@ def run_pre_jump_analysis(date_str: str, dry_run: bool = False, force_all: bool 
                 live_ev,
                 track_meta=track_meta,
                 weather=weather,
-                meeting_bias=meeting_bias,
+                meeting_bias=race_bias,
                 youtube_transcript=yt_transcript,
             )
             live_ev["scored_runners"] = scored
@@ -196,12 +223,13 @@ def run_pre_jump_analysis(date_str: str, dry_run: bool = False, force_all: bool 
             pricing = price_and_generate_bets(live_ev)
             m_to_jump = mins_lookup.get(live_ev["race_id"])
             stage = "final" if (force_all or m_to_jump is None or m_to_jump <= FINAL_LOCK_THRESHOLD_MINUTES) else "early"
+            race_bias = race_bias_by_id.get(live_ev["race_id"], meeting_bias)
             update_doc = {
                 "status": live_ev["status"],
                 "track_condition": live_ev["track_condition"],
                 "track_condition_band": live_ev["track_condition_band"],
                 "rail_position": live_ev["rail_position"],
-                "meeting_bias": meeting_bias,
+                "meeting_bias": race_bias,
                 "scored_runners": live_ev["scored_runners"],
                 "win_selection": pricing["win_selection"],
                 "top_10": pricing["top_10"],
