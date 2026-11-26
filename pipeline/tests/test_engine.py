@@ -298,3 +298,45 @@ def test_exotic_field_size_short_fav_and_harville_return_gates():
     ]
     settled = settle_race(short_race, results, {"best_tote_win": {str(top_nums[0]): 1.4}, "exacta": 3.2})
     assert settled["exacta"] is None
+
+
+def test_youtube_xml_feed_discovery_and_runner_snippet_extraction():
+    from datetime import datetime, timezone
+    from pipeline.src.sources.youtube_feed import (
+        extract_runner_relevant_snippets,
+        match_videos_to_meeting,
+        parse_youtube_atom_feed,
+    )
+
+    sample_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <yt:videoId>vidFreshHaw1</yt:videoId>
+        <title>Hawkesbury Full Preview &amp; Best Bets | Thursday Racing</title>
+        <published>2026-11-25T22:00:00+00:00</published>
+      </entry>
+      <entry>
+        <yt:videoId>vidStaleHaw2</yt:videoId>
+        <title>Hawkesbury Old Preview From Last Week</title>
+        <published>2026-11-20T05:00:00+00:00</published>
+      </entry>
+      <entry>
+        <yt:videoId>vidFreshFlem</yt:videoId>
+        <title>Flemington Track Walk and Quaddie Tips</title>
+        <published>2026-11-25T18:30:00+00:00</published>
+      </entry>
+    </feed>"""
+
+    now = datetime(2026, 11, 26, 0, 0, 0, tzinfo=timezone.utc)
+    recent = parse_youtube_atom_feed(sample_xml, "Racing.com", now_utc=now, lookback_hours=36)
+    assert len(recent) == 2
+    assert {v["video_id"] for v in recent} == {"vidFreshHaw1", "vidFreshFlem"}
+
+    matched = match_videos_to_meeting(recent, "Hawkesbury", aliases=["Hawkesbury"])
+    assert len(matched) == 1
+    assert matched[0]["video_id"] == "vidFreshHaw1"
+
+    long_transcript = ("intro chatter " * 200) + "In Race 3 we really love Harbour Sovereign off a sharp trial. " + ("outro filler " * 200)
+    snippet = extract_runner_relevant_snippets(long_transcript, ["Harbour Sovereign"], max_total_chars=400)
+    assert "Harbour Sovereign" in snippet
+    assert len(snippet) <= 400

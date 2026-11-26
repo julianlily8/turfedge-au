@@ -13,7 +13,8 @@ from pipeline.src.firestore_client import FirestoreStore
 from pipeline.src.http_client import PoliteHttpClient
 from pipeline.src.sources.ladbrokes import LadbrokesSource
 from pipeline.src.sources.weather import WeatherSource
-from pipeline.src.sources.youtube import fetch_transcripts_for_urls, load_configured_youtube_urls
+from pipeline.src.sources.youtube import load_configured_youtube_urls
+from pipeline.src.sources.youtube_feed import YouTubeFeedDiscovery
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("morning_ingest")
@@ -63,6 +64,7 @@ def run_morning_ingest(date_str: str, dry_run: bool = False, max_meetings: int =
     http = PoliteHttpClient(min_delay_seconds=3.0)
     ladbrokes = LadbrokesSource(http)
     weather_src = WeatherSource(http)
+    yt_discovery = YouTubeFeedDiscovery(http)
     yt_fs_config = store.get_doc("config", "youtube_previews")
 
     meetings = ladbrokes.fetch_aus_meetings(date_str, include_country=False)
@@ -73,6 +75,9 @@ def run_morning_ingest(date_str: str, dry_run: bool = False, max_meetings: int =
         logger.info("No Metro/Provincial AUS thoroughbred meetings found for %s.", date_str)
         return
 
+    # Fetch public YouTube racing channel XML feeds once for the whole day (zero API key)
+    recent_yt_videos = yt_discovery.fetch_recent_channel_videos()
+
     now_iso = datetime.now(timezone.utc).isoformat()
     for meeting in meetings:
         slug = meeting["meeting_slug"]
@@ -81,8 +86,7 @@ def run_morning_ingest(date_str: str, dry_run: bool = False, max_meetings: int =
 
         weather = weather_src.fetch_track_weather(meeting["track_meta"])
         meeting_bias = compute_meeting_bias([])
-        yt_urls = load_configured_youtube_urls(date_str, slug, firestore_config=yt_fs_config)
-        yt_transcript = fetch_transcripts_for_urls(yt_urls) if yt_urls else ""
+        manual_yt_urls = load_configured_youtube_urls(date_str, slug, firestore_config=yt_fs_config)
 
         fetched_events = []
         existing_map = {}
@@ -125,15 +129,31 @@ def run_morning_ingest(date_str: str, dry_run: bool = False, max_meetings: int =
                 elif runner["opening_win"] <= 1.0 and runner["live_win"] > 1.0:
                     runner["opening_win"] = runner["live_win"]
 
-            scored = score_race_23pt(
+            fetched_events.append(ev)
+
+        # Auto-discover matching YouTube preview transcripts for this meeting & extract runner snippets
+        all_runner_names = [
+            r.get("name") or ""
+            for ev in fetched_events
+            for r in (ev.get("runners") or [])
+            if not r.get("is_scratched")
+        ]
+        yt_urls, yt_transcript = yt_discovery.fetch_meeting_transcript(
+            recent_videos=recent_yt_videos,
+            meeting_name=meeting["display_name"],
+            aliases=(meeting.get("track_meta") or {}).get("aliases") or [meeting["name"]],
+            extra_urls=manual_yt_urls,
+            runner_names=all_runner_names,
+        )
+
+        for ev in fetched_events:
+            ev["scored_runners"] = score_race_23pt(
                 ev,
                 meeting["track_meta"],
                 weather,
                 meeting_bias=meeting_bias,
                 youtube_transcript=yt_transcript,
             )
-            ev["scored_runners"] = scored
-            fetched_events.append(ev)
 
         # Run Gemini meeting-level batch at 8:27 AM so EVERY race on the card gets full
         # Gemini ratings, #1 Win, SRM, Exotic, and Quaddie picks immediately (immune to cron jitter!).

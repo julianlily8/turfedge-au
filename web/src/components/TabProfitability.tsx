@@ -20,11 +20,14 @@ import {
   ChevronDown,
   ChevronUp,
   Trophy,
+  CheckCircle2,
+  ShieldCheck,
 } from 'lucide-react';
-import type { SettlementDoc } from '../lib/types';
+import type { MeetingDoc, RaceDoc, SettlementDoc } from '../lib/types';
 import {
   COMBINED_CATEGORY_OPTIONS,
   MIN_SAMPLE_WINS_FOR_TUNING,
+  computeCoverageAudit,
   computeProfitability,
   filterSettlements,
   formatOrdinal,
@@ -37,6 +40,9 @@ import {
 
 interface Props {
   settlements: SettlementDoc[];
+  auditMeetings?: MeetingDoc[];
+  auditRaces?: RaceDoc[];
+  selectedDate?: string;
   loading?: boolean;
 }
 
@@ -53,7 +59,13 @@ const LEDGER_BET_FILTERS: { key: string; label: string }[] = [
   { key: 'quaddie', label: 'Quaddie' },
 ];
 
-export function TabProfitability({ settlements, loading = false }: Props) {
+export function TabProfitability({
+  settlements,
+  auditMeetings = [],
+  auditRaces = [],
+  selectedDate,
+  loading = false,
+}: Props) {
   const [filters, setFilters] = useState<ProfitabilityFilters>({
     trackCondition: 'All',
     distanceBand: 'All',
@@ -65,6 +77,18 @@ export function TabProfitability({ settlements, loading = false }: Props) {
   const [ledgerBetFilter, setLedgerBetFilter] = useState<string>('all');
   const [wonOnly, setWonOnly] = useState<boolean>(false);
   const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
+  const [auditScope, setAuditScope] = useState<'overall' | 'selected'>('overall');
+
+  const overallAudit = useMemo(
+    () => computeCoverageAudit(auditMeetings, auditRaces, settlements),
+    [auditMeetings, auditRaces, settlements]
+  );
+  const dateAudit = useMemo(
+    () => computeCoverageAudit(auditMeetings, auditRaces, settlements, selectedDate),
+    [auditMeetings, auditRaces, settlements, selectedDate]
+  );
+  const activeAudit = auditScope === 'selected' && selectedDate ? dateAudit : overallAudit;
+  const totalMissing = activeAudit.missingRaces.length + activeAudit.missingQuaddies.length;
 
   const toggleCombinedKey = (key: string) => {
     setSelectedCombinedKeys((prev) =>
@@ -129,6 +153,78 @@ export function TabProfitability({ settlements, loading = false }: Props) {
 
   return (
     <div className="space-y-5">
+      {/* Coverage & Integrity Audit Strip */}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-800 bg-slate-900/80 px-4 py-3">
+        <div className="flex flex-wrap items-center gap-3 text-xs">
+          <div className="flex items-center gap-1.5 font-bold text-slate-100">
+            <ShieldCheck className="h-4 w-4 text-emerald-400" />
+            <span>Coverage &amp; Integrity Audit</span>
+          </div>
+
+          <div className="inline-flex rounded-lg border border-slate-800 bg-slate-950 p-0.5 text-[11px]">
+            <button
+              type="button"
+              onClick={() => setAuditScope('overall')}
+              className={`rounded-md px-2.5 py-0.5 font-semibold transition ${
+                auditScope === 'overall' ? 'bg-slate-800 text-white' : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              Overall
+            </button>
+            {selectedDate && (
+              <button
+                type="button"
+                onClick={() => setAuditScope('selected')}
+                className={`rounded-md px-2.5 py-0.5 font-semibold transition ${
+                  auditScope === 'selected' ? 'bg-slate-800 text-white' : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                {selectedDate}
+              </button>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 tabular-nums">
+            <span className="rounded-lg border border-slate-800 bg-slate-950/70 px-2.5 py-1 text-slate-300">
+              Tracked Races Settled:{' '}
+              <strong className="text-white">
+                {activeAudit.trackedSettled} / {activeAudit.trackedFinished}
+              </strong>
+            </span>
+            <span className="rounded-lg border border-slate-800 bg-slate-950/70 px-2.5 py-1 text-slate-300">
+              Quaddies Settled:{' '}
+              <strong className="text-white">
+                {activeAudit.quaddiesSettled} / {activeAudit.quaddiesEligible}
+              </strong>
+            </span>
+            <span
+              className="rounded-lg border border-slate-800 bg-slate-950/70 px-2.5 py-1 text-slate-400"
+              title="Historical FINAL · NO PICK races finished without a TurfEdge selection and excluded from POT%."
+            >
+              Untracked (No Pick): <strong className="text-slate-200">{activeAudit.untrackedNoPick}</strong>
+            </span>
+            {activeAudit.upcomingTracked > 0 && (
+              <span className="rounded-lg border border-sky-500/25 bg-sky-500/10 px-2.5 py-1 text-sky-300">
+                Upcoming Tracked: <strong>{activeAudit.upcomingTracked}</strong>
+              </span>
+            )}
+          </div>
+        </div>
+
+        {totalMissing === 0 ? (
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/40 bg-emerald-500/15 px-3 py-1 text-xs font-bold text-emerald-300">
+            <CheckCircle2 className="h-3.5 w-3.5" /> 0 Missing
+          </span>
+        ) : (
+          <span
+            title={`Awaiting settlement: ${[...activeAudit.missingRaces, ...activeAudit.missingQuaddies].join(', ')}`}
+            className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/45 bg-amber-500/15 px-3 py-1 text-xs font-bold text-amber-300"
+          >
+            <AlertTriangle className="h-3.5 w-3.5" /> {totalMissing} Awaiting Settlement
+          </span>
+        )}
+      </div>
+
       {/* Weight-Tuning Filters Bar */}
       <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">

@@ -1,5 +1,120 @@
-import type { SettlementDoc } from './types';
+import type { MeetingDoc, RaceDoc, SettlementDoc } from './types';
 import { FACTOR_DEFINITIONS } from './localScorer23pt';
+
+export interface CoverageAuditStats {
+  trackedSettled: number;
+  trackedFinished: number;
+  missingRaces: string[];
+  quaddiesSettled: number;
+  quaddiesEligible: number;
+  missingQuaddies: string[];
+  untrackedNoPick: number;
+  upcomingTracked: number;
+}
+
+function parseStartTimeMs(ts?: string): number | null {
+  if (!ts) return null;
+  let cleaned = ts.trim();
+  if (cleaned.endsWith(' UTC')) {
+    cleaned = cleaned.slice(0, -4).trim().replace(' ', 'T').replace(' +0000', 'Z');
+  }
+  const ms = Date.parse(cleaned);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+function isRaceFinished(r: RaceDoc, nowMs: number): boolean {
+  const st = (r.status || '').toLowerCase();
+  if (st === 'abandoned') return false;
+  if (r.settled || ['final', 'settled', 'closed', 'paying'].includes(st)) return true;
+  if (r.results && r.results.length > 0) return true;
+  const startMs = parseStartTimeMs(r.advertised_start);
+  if (startMs !== null && nowMs - startMs > 15 * 60 * 1000) return true;
+  return false;
+}
+
+export function computeCoverageAudit(
+  meetings: MeetingDoc[],
+  races: RaceDoc[],
+  settlements: SettlementDoc[],
+  scopeDate?: string
+): CoverageAuditStats {
+  const nowMs = Date.now();
+  const scopedRaces = scopeDate ? races.filter((r) => r.date === scopeDate) : races;
+  const scopedMeetings = scopeDate ? meetings.filter((m) => m.date === scopeDate) : meetings;
+  const scopedSettlements = scopeDate ? settlements.filter((s) => s.date === scopeDate) : settlements;
+
+  const settledRaceIds = new Set(
+    scopedSettlements.filter((s) => s.kind === 'race' && s.race_id).map((s) => s.race_id as string)
+  );
+  const settledQuaddieKeys = new Set(
+    scopedSettlements
+      .filter((s) => s.kind === 'quaddie')
+      .map((s) => `${s.date}_${s.meeting_slug}`)
+  );
+
+  let trackedFinished = 0;
+  let trackedSettled = 0;
+  let untrackedNoPick = 0;
+  let upcomingTracked = 0;
+  const missingRaces: string[] = [];
+
+  const raceById = new Map<string, RaceDoc>();
+  scopedRaces.forEach((r) => {
+    raceById.set(r.race_id, r);
+    const isTracked = Boolean(r.pre_jump_analyzed || r.baseline_analyzed);
+    const finished = isRaceFinished(r, nowMs);
+    if (isTracked) {
+      if (finished) {
+        trackedFinished += 1;
+        if (settledRaceIds.has(r.race_id)) {
+          trackedSettled += 1;
+        } else {
+          missingRaces.push(`${r.meeting_name} R${r.race_number} (${r.date})`);
+        }
+      } else {
+        upcomingTracked += 1;
+      }
+    } else if (finished) {
+      untrackedNoPick += 1;
+    }
+  });
+
+  let quaddiesEligible = 0;
+  let quaddiesSettled = 0;
+  const missingQuaddies: string[] = [];
+
+  scopedMeetings.forEach((m) => {
+    const mKey = `${m.date}_${m.meeting_slug}`;
+    const hasSettledQ = settledQuaddieKeys.has(mKey);
+    const legs = m.quaddie_ticket?.legs || [];
+    const all4LegsTrackedAndFinished =
+      legs.length === 4 &&
+      legs.every((leg) => {
+        const r = raceById.get(leg.race_id);
+        return Boolean(r && (r.pre_jump_analyzed || r.baseline_analyzed) && isRaceFinished(r, nowMs));
+      });
+
+    if (all4LegsTrackedAndFinished || hasSettledQ) {
+      quaddiesEligible += 1;
+      if (hasSettledQ) {
+        quaddiesSettled += 1;
+      } else {
+        missingQuaddies.push(`${m.display_name || m.name} (${m.date})`);
+      }
+    }
+  });
+
+  return {
+    trackedSettled,
+    trackedFinished,
+    missingRaces,
+    quaddiesSettled,
+    quaddiesEligible,
+    missingQuaddies,
+    untrackedNoPick,
+    upcomingTracked,
+  };
+}
 
 export interface ProfitabilityFilters {
   trackCondition: string; // 'All' | 'Firm' | 'Good' | 'Soft' | 'Heavy'

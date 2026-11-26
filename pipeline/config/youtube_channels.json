@@ -1,0 +1,26 @@
+{
+  "lookback_hours": 36,
+  "max_videos_per_meeting": 3,
+  "channels": [
+    {
+      "name": "Racing.com",
+      "handle": "@racingcom",
+      "channel_id": "UCn0dCf3kt0tGfU9_yXayY7Q"
+    },
+    {
+      "name": "Sky Racing",
+      "handle": "@skyracingaustralia",
+      "channel_id": "UCs-eXS_S8uG81wdiW9fOmog"
+    },
+    {
+      "name": "SENTrack",
+      "handle": "@SEN-Track",
+      "channel_id": "UCTT14rNAuDZwntRnheVXatA"
+    },
+    {
+      "name": "Racing Victoria",
+      "handle": "@RacingVictoria",
+      "channel_id": "UC8KRcCHUDNrdvIeITWL88jg"
+    }
+  ]
+}

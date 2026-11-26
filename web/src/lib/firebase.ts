@@ -80,3 +80,19 @@ export async function fetchSettlements(): Promise<SettlementDoc[]> {
     .map((d) => d.data() as SettlementDoc)
     .sort((a, b) => (b.date || '').localeCompare(a.date || '') || (a.race_number || 0) - (b.race_number || 0));
 }
+
+export async function fetchAllMeetingsForAudit(): Promise<MeetingDoc[]> {
+  const db = getDb();
+  if (!db) return [];
+  const q = query(collection(db, 'meetings'), limit(250));
+  const snap = await getDocs(q);
+  return snap.docs.map((d) => d.data() as MeetingDoc);
+}
+
+export async function fetchAllRacesForAudit(): Promise<RaceDoc[]> {
+  const db = getDb();
+  if (!db) return [];
+  const q = query(collection(db, 'races'), limit(800));
+  const snap = await getDocs(q);
+  return snap.docs.map((d) => d.data() as RaceDoc);
+}

@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Activity, BarChart3, CalendarClock, Cloud, Database, RefreshCw } from 'lucide-react';
 import {
+  fetchAllMeetingsForAudit,
+  fetchAllRacesForAudit,
   fetchAvailableDates,
   fetchMeetingsByDate,
   fetchRacesByDate,
@@ -34,13 +36,15 @@ export default function App() {
   const [races, setRaces] = useState<RaceDoc[]>([]);
   const [manualRaces, setManualRaces] = useState<RaceDoc[]>([]);
   const [settlements, setSettlements] = useState<SettlementDoc[]>([]);
+  const [auditMeetings, setAuditMeetings] = useState<MeetingDoc[]>([]);
+  const [auditRaces, setAuditRaces] = useState<RaceDoc[]>([]);
   const [loadingRaces, setLoadingRaces] = useState<boolean>(true);
   const [loadingSettlements, setLoadingSettlements] = useState<boolean>(true);
   const [fallbackDateNotice, setFallbackDateNotice] = useState<string | null>(null);
   const [settlementError, setSettlementError] = useState<string | null>(null);
   const hasAutoSelectedRef = useRef<boolean>(false);
 
-  // Tab 2 (Settlements) is completely decoupled from Tab 1's date/meetings queries
+  // Tab 2 (Settlements & Coverage Audit) is completely decoupled from Tab 1's date/meetings queries
   // and NEVER substitutes hardcoded mock data when Firebase is configured.
   const loadSettlements = async () => {
     setLoadingSettlements(true);
@@ -48,12 +52,20 @@ export default function App() {
     if (!isFirebaseConfigured) {
       const demo = buildDemoPreviewData();
       setSettlements(demo.settlements);
+      setAuditMeetings(demo.meetings);
+      setAuditRaces(demo.races);
       setLoadingSettlements(false);
       return;
     }
     try {
-      const sList = await fetchSettlements();
+      const [sList, allM, allR] = await Promise.all([
+        fetchSettlements(),
+        fetchAllMeetingsForAudit(),
+        fetchAllRacesForAudit(),
+      ]);
       setSettlements(sList);
+      setAuditMeetings(allM);
+      setAuditRaces(allR);
     } catch (err) {
       console.error('Firestore settlements read error:', err);
       setSettlementError('Could not load settlements from Firestore. Try refreshing in a moment.');
@@ -242,7 +254,13 @@ export default function App() {
             onManualRaceAdded={(r) => setManualRaces((prev) => [r, ...prev])}
           />
         ) : (
-          <TabProfitability settlements={settlements} loading={loadingSettlements} />
+          <TabProfitability
+            settlements={settlements}
+            auditMeetings={auditMeetings}
+            auditRaces={auditRaces}
+            selectedDate={selectedDate}
+            loading={loadingSettlements}
+          />
         )}
       </main>
 

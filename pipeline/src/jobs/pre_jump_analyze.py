@@ -123,8 +123,11 @@ def run_pre_jump_analysis(date_str: str, dry_run: bool = False, force_all: bool 
         ]
         meeting_bias = compute_meeting_bias(earlier_settled)
 
-        # Pull configured YouTube preview transcripts once per meeting
-        yt_urls = load_configured_youtube_urls(date_str, slug, firestore_config=yt_fs_config)
+        # Pull configured + auto-discovered YouTube preview transcripts once per meeting
+        stored_yt = []
+        for r in pending_races:
+            stored_yt.extend(r.get("youtube_urls_used") or [])
+        yt_urls = list(dict.fromkeys(stored_yt + load_configured_youtube_urls(date_str, slug, firestore_config=yt_fs_config)))
         yt_transcript = fetch_transcripts_for_urls(yt_urls) if yt_urls else ""
 
         logger.info(
