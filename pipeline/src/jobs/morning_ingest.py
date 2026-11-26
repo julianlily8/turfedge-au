@@ -8,10 +8,11 @@ from zoneinfo import ZoneInfo
 
 from pipeline.src.engine.gemini_batch import GeminiBatchAnalyzer
 from pipeline.src.engine.pricing import build_meeting_quaddie, price_and_generate_bets
-from pipeline.src.engine.scorer_23pt import compute_meeting_bias, score_race_23pt
+from pipeline.src.engine.scorer_23pt import attach_enrichment_to_runners, compute_meeting_bias, score_race_23pt
 from pipeline.src.firestore_client import FirestoreStore
 from pipeline.src.http_client import PoliteHttpClient
 from pipeline.src.sources.ladbrokes import LadbrokesSource
+from pipeline.src.sources.nsw_freefields import NswFreeFieldsSource, parse_ladbrokes_blog_notes
 from pipeline.src.sources.weather import WeatherSource
 from pipeline.src.sources.youtube import load_configured_youtube_urls
 from pipeline.src.sources.youtube_feed import YouTubeFeedDiscovery
@@ -65,6 +66,7 @@ def run_morning_ingest(date_str: str, dry_run: bool = False, max_meetings: int =
     ladbrokes = LadbrokesSource(http)
     weather_src = WeatherSource(http)
     yt_discovery = YouTubeFeedDiscovery(http)
+    nsw_ff = NswFreeFieldsSource(http)
     yt_fs_config = store.get_doc("config", "youtube_previews")
 
     meetings = ladbrokes.fetch_aus_meetings(date_str, include_country=False)
@@ -75,8 +77,13 @@ def run_morning_ingest(date_str: str, dry_run: bool = False, max_meetings: int =
         logger.info("No Metro/Provincial AUS thoroughbred meetings found for %s.", date_str)
         return
 
-    # Fetch public YouTube racing channel XML feeds once for the whole day (zero API key)
+    # Fetch zero-key daily enrichments once for the whole day:
+    # 1) Public YouTube racing channel XML feeds (8 AU channels)
+    # 2) Racing NSW FreeFields Barrier Trials from past 21 days (strictly < date_str)
+    # 3) Ladbrokes daily racing tips blog article matching date_str
     recent_yt_videos = yt_discovery.fetch_recent_channel_videos()
+    nsw_trials_by_horse = nsw_ff.fetch_recent_trials(date_str, lookback_days=21, max_trial_meetings=6)
+    ladbrokes_blog_html = nsw_ff.fetch_ladbrokes_daily_blog_html(date_str)
 
     now_iso = datetime.now(timezone.utc).isoformat()
     for meeting in meetings:
@@ -131,13 +138,22 @@ def run_morning_ingest(date_str: str, dry_run: bool = False, max_meetings: int =
 
             fetched_events.append(ev)
 
-        # Auto-discover matching YouTube preview transcripts for this meeting & extract runner snippets
+        # Enrich runners with Racing NSW Pre-Stewards/Vet comments, 21d Barrier Trials,
+        # Ladbrokes Daily Tips blog snippets, and expanded YouTube preview transcripts
         all_runner_names = [
             r.get("name") or ""
             for ev in fetched_events
             for r in (ev.get("runners") or [])
             if not r.get("is_scratched")
         ]
+        nsw_checked, pre_stewards_map = nsw_ff.fetch_meeting_pre_stewards(
+            date_str=date_str,
+            meeting_name=meeting["name"],
+            state=meeting["state"],
+            aliases=(meeting.get("track_meta") or {}).get("aliases") or [meeting["display_name"]],
+        )
+        blog_notes_map = parse_ladbrokes_blog_notes(ladbrokes_blog_html, all_runner_names)
+
         yt_urls, yt_transcript = yt_discovery.fetch_meeting_transcript(
             recent_videos=recent_yt_videos,
             meeting_name=meeting["display_name"],
@@ -147,6 +163,13 @@ def run_morning_ingest(date_str: str, dry_run: bool = False, max_meetings: int =
         )
 
         for ev in fetched_events:
+            attach_enrichment_to_runners(
+                ev.get("runners") or [],
+                trials_by_horse=nsw_trials_by_horse,
+                pre_stewards_by_horse=pre_stewards_map,
+                blog_notes_by_horse=blog_notes_map,
+                nsw_freefields_checked=nsw_checked,
+            )
             ev["scored_runners"] = score_race_23pt(
                 ev,
                 meeting["track_meta"],

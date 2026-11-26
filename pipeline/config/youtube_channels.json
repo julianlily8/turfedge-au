@@ -1,6 +1,20 @@
 {
   "lookback_hours": 36,
   "max_videos_per_meeting": 3,
+  "general_preview_keywords": [
+    "best bets",
+    "racing preview",
+    "midweek",
+    "saturday racing",
+    "thursday racing",
+    "wednesday agenda",
+    "lay back",
+    "trial show",
+    "quaddie",
+    "tips",
+    "form"
+  ],
+  "min_runner_mentions_for_general_video": 2,
   "channels": [
     {
       "name": "Racing.com",
@@ -21,6 +35,26 @@
       "name": "Racing Victoria",
       "handle": "@RacingVictoria",
       "channel_id": "UC8KRcCHUDNrdvIeITWL88jg"
+    },
+    {
+      "name": "Punters",
+      "handle": "@PuntersAustralia",
+      "channel_id": "UCFcLTY-A6mOBgOveeATqB-g"
+    },
+    {
+      "name": "Racenet",
+      "handle": "@Racenet_AU",
+      "channel_id": "UCSqgmNBQDpoUIZPNB6CkUHg"
+    },
+    {
+      "name": "Betfair Hub",
+      "handle": "@betfairaustralia",
+      "channel_id": "UCt4vq1zM_xQe-APYwY5Pf7w"
+    },
+    {
+      "name": "RSN Racing & Sport",
+      "handle": "@RSNSportRadio927am",
+      "channel_id": "UC72bQJpQpDbnv_2Zh64K9gg"
     }
   ]
 }

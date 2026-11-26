@@ -69,8 +69,13 @@ class GeminiBatchAnalyzer:
                         "last_twenty": r.get("last_twenty_starts") or "",
                         "fluc": r.get("market_fluc"),
                         "form_comment": r.get("form_comment") or None,
+                        "blog_notes": r.get("blog_notes") or [],
+                        "form_indicators": [fi.get("name") for fi in (r.get("form_indicators") or []) if isinstance(fi, dict)],
                         "stewards_notes": r.get("stewards_notes") or [],
                         "vet_notes": r.get("vet_notes") or [],
+                        "vet_clean_notes": r.get("vet_clean_notes") or [],
+                        "trial_runs": r.get("trial_runs") or [],
+                        "nsw_freefields_checked": bool(r.get("nsw_freefields_checked")),
                         "has_trials": audit_map.get("recent_trials", {}).get("has_data", False),
                         "baseline_score": r.get("composite_score"),
                     }

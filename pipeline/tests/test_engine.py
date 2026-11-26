@@ -410,3 +410,67 @@ def test_progressive_bias_free_current_meeting_bias():
     )
     assert f4_r3_onpace["has_data"] is True
     assert f4_r3_onpace["score"] > 5.0
+
+
+def test_nsw_freefields_parsers_and_general_youtube_matching():
+    from pipeline.src.engine.scorer_23pt import attach_enrichment_to_runners
+    from pipeline.src.sources.nsw_freefields import (
+        parse_ladbrokes_blog_notes,
+        parse_pre_stewards_html,
+        parse_trial_results_html,
+    )
+    from pipeline.src.sources.youtube_feed import count_runner_mentions, match_general_preview_videos
+
+    pre_stew_html = """
+    <table>
+      <tr><td>1</td><td>RUNNER 1</td><td>14/11/2026</td><td>Gosford</td><td>Held up at the 300m and raced wide without cover.</td></tr>
+      <tr><td>2</td><td>RUNNER 2</td><td>10/11/2026</td><td>Wyong</td><td>Post-race vet exam revealed lame in near foreleg; veterinary clearance required.</td></tr>
+      <tr><td>3</td><td>RUNNER 3</td><td>26/11/2026</td><td>Hawkesbury</td><td>Post-race incident on target date should be filtered by cutoff.</td></tr>
+    </table>
+    """
+    stew_map = parse_pre_stewards_html(pre_stew_html, cutoff_date_str="2026-11-26")
+    assert "runner1" in stew_map and len(stew_map["runner1"]["stewards_notes"]) == 1
+    assert "runner2" in stew_map and len(stew_map["runner2"]["vet_notes"]) == 1
+    assert "runner3" not in stew_map  # Strictly filtered out by cutoff date
+
+    trial_html = """
+    <table>
+      <tr><td></td><td>1</td><td>4</td><td>RUNNER 1</td><td>Chris Waller</td><td>James McDonald</td><td>0</td><td>0</td></tr>
+      <tr><td></td><td>2</td><td>6</td><td>RUNNER 2</td><td>Ciaron Maher</td><td>Tyler Schiller</td><td>1.25</td><td>0</td></tr>
+    </table>
+    """
+    trials_map = parse_trial_results_html(trial_html, venue="Warwick Farm", trial_date_str="2026-11-24")
+    assert trials_map["runner1"][0]["position"] == 1
+    assert trials_map["runner2"][0]["margin"] == 1.25
+
+    blog_html = "<p>Runner 1 trialled up sharply at Warwick Farm and looks ready to fire first-up.</p>"
+    blog_map = parse_ladbrokes_blog_notes(blog_html, ["Runner 1", "Runner 2"])
+    assert "runner1" in blog_map and "runner2" not in blog_map
+
+    # Attach to sample race and confirm recent_trials, stewards_comments, and injury_history flip LIVE
+    race = _sample_race(field_size=8)
+    attach_enrichment_to_runners(
+        race["runners"],
+        trials_by_horse=trials_map,
+        pre_stewards_by_horse=stew_map,
+        blog_notes_by_horse=blog_map,
+        nsw_freefields_checked=True,
+    )
+    track_meta = {"name": "Royal Randwick", "home_straight_m": 410, "turning": "Clockwise"}
+    weather = {"source": "BOM Hourly API", "headwind_kmh": 0.0, "wind_speed_kmh": 5.0, "rain_expected_mm": 0.0, "effect": "Calm"}
+    scored = score_race_23pt(race, track_meta, weather)
+    r1 = next(r for r in scored if r["runner_number"] == 1)
+    r2 = next(r for r in scored if r["runner_number"] == 2)
+    r1_aud = {a["key"]: a for a in r1["audit_23pt"]}
+    r2_aud = {a["key"]: a for a in r2["audit_23pt"]}
+
+    assert r1_aud["recent_trials"]["has_data"] is True and r1_aud["recent_trials"]["score"] > 7.5
+    assert r1_aud["stewards_comments"]["has_data"] is True and r1_aud["stewards_comments"]["score"] > 6.5
+    assert r1_aud["injury_history"]["has_data"] is True and r1_aud["injury_history"]["score"] == NEUTRAL_SCORE
+    assert r2_aud["injury_history"]["has_data"] is True and r2_aud["injury_history"]["score"] < 4.0
+
+    # General YouTube preview matching
+    vids = [{"video_id": "g1", "title": "Thursday Best Bets & Racing Preview", "channel": "Punters"}]
+    cands = match_general_preview_videos(vids, ["best bets", "racing preview"])
+    assert len(cands) == 1
+    assert count_runner_mentions("We love Stonecrest in R1 and Outta Line in R2.", ["Stonecrest", "Outta Line", "Other"]) == 2

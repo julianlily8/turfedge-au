@@ -192,8 +192,14 @@ class LadbrokesSource:
             jockey_perfs_list = jockey_perfs_raw if isinstance(jockey_perfs_raw, list) else []
             jockey_perfs_stats = jockey_perfs_raw if isinstance(jockey_perfs_raw, dict) else {}
 
-            # Extract any genuine text fields without inventing anything
-            form_comment = (r.get("form_comment") or "").strip()
+            # Extract any genuine text fields & form indicators without inventing anything
+            form_comment = (r.get("form_comment") or r.get("comment") or r.get("overview") or "").strip()
+            raw_indicators = r.get("form_indicators") or []
+            form_indicators = [
+                {"name": str(fi.get("name") or ""), "group": str(fi.get("group") or ""), "negative": bool(fi.get("negative", False))}
+                for fi in raw_indicators
+                if isinstance(fi, dict) and fi.get("name")
+            ]
             stewards_notes = self._extract_stewards_from_past_runs(past_perfs_list)
             trial_runs = self._extract_trials_from_past_runs(past_perfs_list)
             vet_notes = self._extract_vet_notes(form_comment, stewards_notes)
@@ -228,9 +234,13 @@ class LadbrokesSource:
                     "speedmap_label": (speedmap.get("label") or "").strip(),
                     "settling_lengths": _safe_float(speedmap.get("settling_lengths"), -1.0),
                     "form_comment": form_comment,
+                    "form_indicators": form_indicators,
                     "stewards_notes": stewards_notes,
                     "vet_notes": vet_notes,
+                    "vet_clean_notes": [],
                     "trial_runs": trial_runs,
+                    "blog_notes": [],
+                    "nsw_freefields_checked": False,
                     "past_performances": past_perfs_list[:8],
                     "past_performance_stats": past_perfs_stats,
                     "jockey_past_performances": jockey_perfs_list[:10],

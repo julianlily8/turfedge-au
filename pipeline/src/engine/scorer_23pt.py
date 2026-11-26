@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from pipeline.src.sources.betfair_bsp import normalize_horse_name
+
 WEIGHTS_PATH = Path(__file__).resolve().parents[2] / "config" / "factor_weights.json"
 NEUTRAL_SCORE = 5.0
 NO_DATA_LABEL = "No data available"
@@ -270,6 +272,42 @@ def _days_since_last_run(past_perfs: List[Dict[str, Any]], race_date_str: str) -
     return None
 
 
+def attach_enrichment_to_runners(
+    runners: List[Dict[str, Any]],
+    trials_by_horse: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    pre_stewards_by_horse: Optional[Dict[str, Dict[str, List[str]]]] = None,
+    blog_notes_by_horse: Optional[Dict[str, List[str]]] = None,
+    nsw_freefields_checked: bool = False,
+) -> None:
+    """Attach zero-key NSW FreeFields trials, Pre-Stewards/vet notes, and Ladbrokes blog notes to runners."""
+    trials_by_horse = trials_by_horse or {}
+    pre_stewards_by_horse = pre_stewards_by_horse or {}
+    blog_notes_by_horse = blog_notes_by_horse or {}
+
+    for r in runners:
+        norm = normalize_horse_name(r.get("name") or "")
+        if not norm:
+            continue
+        if nsw_freefields_checked:
+            r["nsw_freefields_checked"] = True
+
+        if norm in trials_by_horse:
+            existing_t = list(r.get("trial_runs") or [])
+            r["trial_runs"] = trials_by_horse[norm][:3] + existing_t
+
+        ps = pre_stewards_by_horse.get(norm)
+        if ps:
+            r["stewards_notes"] = list(dict.fromkeys((r.get("stewards_notes") or []) + (ps.get("stewards_notes") or [])))[:4]
+            r["vet_notes"] = list(dict.fromkeys((r.get("vet_notes") or []) + (ps.get("vet_notes") or [])))[:3]
+            r["vet_clean_notes"] = list(dict.fromkeys((r.get("vet_clean_notes") or []) + (ps.get("vet_clean_notes") or [])))[:3]
+            if ps.get("trial_notes"):
+                r["stewards_trial_notes"] = ps["trial_notes"][:2]
+
+        bn = blog_notes_by_horse.get(norm)
+        if bn:
+            r["blog_notes"] = bn[:2]
+
+
 def score_race_23pt(
     race: Dict[str, Any],
     track_meta: Dict[str, Any],
@@ -426,19 +464,50 @@ def score_race_23pt(
             sec_reason += f" Tight finishing margins in {close_runs} of last 3 runs."
         audit["adjusted_sectionals"] = {"score": sec_score, "has_data": bool(last_twenty or past_perfs), "reason": sec_reason}
 
-        # 7. Recent Trials & Jumpouts (STRICT neutral fallback if absent)
+        # 7. Recent Trials & Jumpouts (NSW FreeFields 21d trials + blog/stewards trial mentions)
         trials = r.get("trial_runs") or []
-        if not trials:
-            audit["recent_trials"] = {"score": NEUTRAL_SCORE, "has_data": False, "reason": NO_DATA_LABEL}
-        else:
+        blog_notes = r.get("blog_notes") or []
+        blog_trial_hit = next((b for b in blog_notes if "trial" in b.lower() or "jumpout" in b.lower()), None)
+        stewards_trial_notes = r.get("stewards_trial_notes") or []
+        nsw_checked = bool(r.get("nsw_freefields_checked"))
+
+        if trials:
             t0 = trials[0]
             t_pos = int(t0.get("position") or t0.get("finish_position") or 5)
-            t_score = 8.2 if t_pos == 1 else (7.0 if t_pos == 2 else (6.0 if t_pos == 3 else 4.8))
+            t_margin = float(t0.get("margin") or 0.0)
+            t_venue = t0.get("venue") or "NSW"
+            t_date = t0.get("date") or "recent"
+            if t_pos == 1:
+                t_score = 8.4
+                t_reason = f"Won {t_venue} barrier trial ({t_date}) cleanly ({len(trials)} recent trial(s))."
+            elif t_pos == 2:
+                t_score = 7.4 if t_margin <= 1.5 else 6.8
+                t_reason = f"2nd in {t_venue} barrier trial ({t_date}, {t_margin:.1f}L margin)."
+            elif t_pos == 3:
+                t_score = 6.4 if t_margin <= 2.5 else 5.8
+                t_reason = f"3rd in {t_venue} barrier trial ({t_date}, {t_margin:.1f}L margin)."
+            else:
+                t_score = 4.9 if t_margin <= 4.0 else 4.3
+                t_reason = f"Finished {t_pos}th in {t_venue} barrier trial ({t_date}, {t_margin:.1f}L)."
+            audit["recent_trials"] = {"score": clamp(t_score), "has_data": True, "reason": t_reason}
+        elif blog_trial_hit:
             audit["recent_trials"] = {
-                "score": clamp(t_score),
+                "score": 6.8,
                 "has_data": True,
-                "reason": f"Recent trial/jumpout finished {t_pos} ({len(trials)} trial(s) recorded).",
+                "reason": f"Ladbrokes preview trial note: {blog_trial_hit[:120]}",
             }
+        elif stewards_trial_notes:
+            st_t = stewards_trial_notes[0]
+            sc = 5.4 if "has trial" in st_t.lower() else 4.4
+            audit["recent_trials"] = {"score": sc, "has_data": True, "reason": st_t[:130]}
+        elif nsw_checked:
+            audit["recent_trials"] = {
+                "score": NEUTRAL_SCORE,
+                "has_data": True,
+                "reason": "Checked Racing NSW FreeFields (21d): no recent barrier trial (neutral 5.0).",
+            }
+        else:
+            audit["recent_trials"] = {"score": NEUTRAL_SCORE, "has_data": False, "reason": NO_DATA_LABEL}
 
         # 8. Pedigree & Sire/Dam Suitability
         if not sire_l:
@@ -592,45 +661,91 @@ def score_race_23pt(
                 g_reason = f"Standard gear: {gear}."
             audit["gear_changes"] = {"score": clamp(g_score), "has_data": True, "reason": g_reason}
 
-        # 16. Injury & Vet History (STRICT neutral fallback if absent)
+        # 16. Injury & Vet History (NSW Pre-Stewards vet flags/clearances + strict neutral fallback)
         vet_notes = r.get("vet_notes") or []
-        if not vet_notes:
-            audit["injury_history"] = {"score": NEUTRAL_SCORE, "has_data": False, "reason": NO_DATA_LABEL}
-        else:
+        vet_clean_notes = r.get("vet_clean_notes") or []
+        if vet_notes:
             audit["injury_history"] = {
-                "score": 3.5,
+                "score": 3.4,
                 "has_data": True,
-                "reason": f"Vet/injury mention flagged: {vet_notes[0][:110]}",
+                "reason": f"Vet/stand-down flag: {vet_notes[0][:125]}",
             }
-
-        # 17. Stewards Comments (STRICT neutral fallback if absent)
-        stewards_notes = r.get("stewards_notes") or []
-        if not stewards_notes:
-            audit["stewards_comments"] = {"score": NEUTRAL_SCORE, "has_data": False, "reason": NO_DATA_LABEL}
+        elif vet_clean_notes:
+            audit["injury_history"] = {
+                "score": 5.3,
+                "has_data": True,
+                "reason": f"Vet check cleared: {vet_clean_notes[0][:125]}",
+            }
+        elif nsw_checked:
+            audit["injury_history"] = {
+                "score": NEUTRAL_SCORE,
+                "has_data": True,
+                "reason": "Checked Racing NSW Pre-Stewards: clean vet/injury record (neutral 5.0).",
+            }
         else:
-            st_text = " ".join(stewards_notes).lower()
-            excuse_kws = ("held up", "blocked", "checked", "wide", "slow to begin", "bumped", "interference")
-            if any(kw in st_text for kw in excuse_kws):
-                audit["stewards_comments"] = {
-                    "score": 6.8,
-                    "has_data": True,
-                    "reason": f"Forgive/excuse noted in stewards text: {stewards_notes[0][:110]}",
-                }
-            else:
-                audit["stewards_comments"] = {
-                    "score": 5.2,
-                    "has_data": True,
-                    "reason": stewards_notes[0][:110],
-                }
+            audit["injury_history"] = {"score": NEUTRAL_SCORE, "has_data": False, "reason": NO_DATA_LABEL}
 
-        # 18. Trainer & Jockey Commentary (STRICT neutral fallback if absent)
+        # 17. Stewards Comments (NSW Pre-Stewards excuses/adverse notes + strict neutral fallback)
+        stewards_notes = r.get("stewards_notes") or []
+        if stewards_notes:
+            st_text = " ".join(stewards_notes).lower()
+            excuse_kws = (
+                "held up", "blocked", "checked", "wide without cover", "raced wide",
+                "slow to begin", "bumped", "interference", "restricted room", "shifted out on jumping",
+            )
+            adverse_kws = ("weakened", "disappointing", "overraced", "raced keenly", "failed to respond", "hung out")
+            has_excuse = any(kw in st_text for kw in excuse_kws)
+            has_adverse = any(kw in st_text for kw in adverse_kws)
+            if has_excuse and not has_adverse:
+                st_score = 7.1
+                st_prefix = "Stewards forgive/excuse: "
+            elif has_adverse and not has_excuse:
+                st_score = 4.3
+                st_prefix = "Stewards caution: "
+            else:
+                st_score = 5.4
+                st_prefix = "Stewards note: "
+            audit["stewards_comments"] = {
+                "score": st_score,
+                "has_data": True,
+                "reason": f"{st_prefix}{stewards_notes[0][:125]}",
+            }
+        elif nsw_checked:
+            audit["stewards_comments"] = {
+                "score": NEUTRAL_SCORE,
+                "has_data": True,
+                "reason": "Checked Racing NSW Pre-Stewards: clean stewards record (neutral 5.0).",
+            }
+        else:
+            audit["stewards_comments"] = {"score": NEUTRAL_SCORE, "has_data": False, "reason": NO_DATA_LABEL}
+
+        # 18. Trainer & Jockey Commentary (Ladbrokes daily tips blog + race preview + form indicators)
         form_comment = (r.get("form_comment") or "").strip()
         runner_in_race_comment = bool(race_comment and r.get("name") and r["name"].lower() in race_comment.lower())
-        if not form_comment and not runner_in_race_comment:
-            audit["trainer_jockey_commentary"] = {"score": NEUTRAL_SCORE, "has_data": False, "reason": NO_DATA_LABEL}
+        form_indicators = r.get("form_indicators") or []
+        pos_indicators = [fi["name"] for fi in form_indicators if not fi.get("negative")]
+        if blog_notes:
+            audit["trainer_jockey_commentary"] = {
+                "score": 6.6,
+                "has_data": True,
+                "reason": f"Ladbrokes Daily Tips: {blog_notes[0][:130]}",
+            }
+        elif form_comment:
+            audit["trainer_jockey_commentary"] = {"score": 6.1, "has_data": True, "reason": form_comment[:130]}
+        elif runner_in_race_comment:
+            audit["trainer_jockey_commentary"] = {
+                "score": 6.0,
+                "has_data": True,
+                "reason": f"Highlighted in official race preview for {r.get('name')}.",
+            }
+        elif pos_indicators:
+            audit["trainer_jockey_commentary"] = {
+                "score": 5.8,
+                "has_data": True,
+                "reason": f"Form indicator: {', '.join(pos_indicators[:2])}.",
+            }
         else:
-            snippet = form_comment if form_comment else f"Highlighted in official race preview for {r.get('name')}."
-            audit["trainer_jockey_commentary"] = {"score": 6.0, "has_data": True, "reason": snippet[:120]}
+            audit["trainer_jockey_commentary"] = {"score": NEUTRAL_SCORE, "has_data": False, "reason": NO_DATA_LABEL}
 
         # 19. Target-Race Preparation Weighting
         prize = float(r.get("prize_money") or 0.0)

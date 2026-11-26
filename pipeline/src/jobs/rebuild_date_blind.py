@@ -8,11 +8,12 @@ from typing import Any, Dict, List
 
 from pipeline.src.engine.gemini_batch import GeminiBatchAnalyzer
 from pipeline.src.engine.pricing import build_meeting_quaddie, price_and_generate_bets
-from pipeline.src.engine.scorer_23pt import compute_meeting_bias, score_race_23pt
+from pipeline.src.engine.scorer_23pt import attach_enrichment_to_runners, compute_meeting_bias, score_race_23pt
 from pipeline.src.firestore_client import FirestoreStore
 from pipeline.src.http_client import PoliteHttpClient
 from pipeline.src.jobs.post_race_settle import run_settlement_for_date
 from pipeline.src.sources.ladbrokes import LadbrokesSource
+from pipeline.src.sources.nsw_freefields import NswFreeFieldsSource, parse_ladbrokes_blog_notes
 from pipeline.src.sources.weather import WeatherSource
 from pipeline.src.sources.youtube import load_configured_youtube_urls
 from pipeline.src.sources.youtube_feed import YouTubeFeedDiscovery
@@ -81,6 +82,7 @@ def run_blind_two_phase_rebuild(
     weather_src = WeatherSource(http)
     gemini = GeminiBatchAnalyzer()
     yt_discovery = YouTubeFeedDiscovery(http)
+    nsw_ff = NswFreeFieldsSource(http)
     yt_fs_config = store.get_doc("config", "youtube_previews")
 
     yt_cutoff_utc = datetime.fromisoformat(yt_cutoff_iso.replace("Z", "+00:00")).astimezone(timezone.utc)
@@ -95,11 +97,16 @@ def run_blind_two_phase_rebuild(
         logger.warning("No AUS Metro/Provincial meetings found for %s.", date_str)
         return
 
-    # Only allow YouTube videos published STRICTLY BEFORE yt_cutoff_utc (prior to Race 1)
+    # Strictly pre-race zero-key enrichments (zero hindsight bias):
+    # 1) YouTube videos published STRICTLY BEFORE yt_cutoff_utc (prior to Race 1)
+    # 2) NSW Barrier Trials dated STRICTLY BEFORE date_str (21-day lookback)
+    # 3) Ladbrokes daily racing tips blog preview for date_str (published pre-race)
     recent_yt_videos = yt_discovery.fetch_recent_channel_videos(
         lookback_hours=yt_lookback_hours,
         upper_bound_utc=yt_cutoff_utc,
     )
+    nsw_trials_by_horse = nsw_ff.fetch_recent_trials(date_str, lookback_days=21, max_trial_meetings=6)
+    ladbrokes_blog_html = nsw_ff.fetch_ladbrokes_daily_blog_html(date_str)
     logger.info("Blind pre-cutoff YouTube videos discovered: %d", len(recent_yt_videos))
 
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -145,6 +152,14 @@ def run_blind_two_phase_rebuild(
             for r in (ev.get("runners") or [])
             if not r.get("is_scratched")
         ]
+        # Pre-Stewards Comments strictly filtered to incidents dated < date_str
+        nsw_checked, pre_stewards_map = nsw_ff.fetch_meeting_pre_stewards(
+            date_str=date_str,
+            meeting_name=meeting["name"],
+            state=meeting["state"],
+            aliases=(meeting.get("track_meta") or {}).get("aliases") or [meeting["display_name"]],
+        )
+        blog_notes_map = parse_ladbrokes_blog_notes(ladbrokes_blog_html, all_runner_names)
         yt_urls, yt_transcript = yt_discovery.fetch_meeting_transcript(
             recent_videos=recent_yt_videos,
             meeting_name=meeting["display_name"],
@@ -154,6 +169,13 @@ def run_blind_two_phase_rebuild(
         )
 
         for ev in blind_events:
+            attach_enrichment_to_runners(
+                ev.get("runners") or [],
+                trials_by_horse=nsw_trials_by_horse,
+                pre_stewards_by_horse=pre_stewards_map,
+                blog_notes_by_horse=blog_notes_map,
+                nsw_freefields_checked=nsw_checked,
+            )
             ev["scored_runners"] = score_race_23pt(
                 ev,
                 meeting["track_meta"],

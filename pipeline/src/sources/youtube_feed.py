@@ -180,12 +180,57 @@ def extract_runner_relevant_snippets(
     return combined[:max_total_chars]
 
 
+def match_general_preview_videos(
+    videos: List[Dict[str, Any]],
+    keywords: List[str],
+    exclude_ids: Optional[set] = None,
+    max_candidates: int = 4,
+) -> List[Dict[str, Any]]:
+    """Find general daily preview videos (Best Bets, Racing Preview, Midweek, etc.) for caption-level runner matching."""
+    exclude_ids = exclude_ids or set()
+    kw_lower = [k.lower().strip() for k in keywords if k.strip()]
+    out: List[Dict[str, Any]] = []
+    seen = set(exclude_ids)
+    for v in videos:
+        vid = v["video_id"]
+        if vid in seen:
+            continue
+        tl = (v.get("title") or "").lower()
+        if any(kw in tl for kw in kw_lower):
+            out.append(v)
+            seen.add(vid)
+            if len(out) >= max_candidates:
+                break
+    return out
+
+
+def count_runner_mentions(transcript_text: str, runner_names: List[str]) -> int:
+    if not transcript_text or not runner_names:
+        return 0
+    tl = transcript_text.lower()
+    hits = 0
+    seen = set()
+    for name in runner_names:
+        clean = (name or "").strip().lower()
+        if len(clean) >= 4 and clean not in seen:
+            seen.add(clean)
+            if clean in tl:
+                hits += 1
+    return hits
+
+
 class YouTubeFeedDiscovery:
     """Zero-key public YouTube Atom XML feed discovery for Australian racing preview videos."""
 
     def __init__(self, http: PoliteHttpClient) -> None:
         self.http = http
         self.cfg = load_youtube_channels_config()
+        self._transcript_cache: Dict[str, str] = {}
+
+    def _get_cached_transcript(self, url: str) -> str:
+        if url not in self._transcript_cache:
+            self._transcript_cache[url] = fetch_transcripts_for_urls([url], max_chars_per_video=8000)
+        return self._transcript_cache[url]
 
     def fetch_recent_channel_videos(
         self,
@@ -232,24 +277,64 @@ class YouTubeFeedDiscovery:
         extra_urls: Optional[List[str]] = None,
         runner_names: Optional[List[str]] = None,
     ) -> Tuple[List[str], str]:
-        """Match recent channel videos + manual URLs, fetch captions, and return (urls_used, focused_transcript)."""
+        """
+        Match venue-specific titles AND general daily preview titles whose captions mention
+        >=2 runners racing at this meeting, plus any manual URLs. Returns (urls_used, focused_transcript).
+        """
         max_vids = int(self.cfg.get("max_videos_per_meeting", 3))
-        matched = match_videos_to_meeting(recent_videos, meeting_name, aliases=aliases, max_videos=max_vids)
+        min_mentions = int(self.cfg.get("min_runner_mentions_for_general_video", 2))
+        gen_keywords = self.cfg.get("general_preview_keywords") or [
+            "best bets", "racing preview", "midweek", "saturday racing", "tips",
+        ]
+
+        matched_venue = match_videos_to_meeting(recent_videos, meeting_name, aliases=aliases, max_videos=max_vids)
+        venue_ids = {v["video_id"] for v in matched_venue}
 
         urls: List[str] = []
-        seen = set()
-        for u in [v["url"] for v in matched] + list(extra_urls or []):
-            if u and u not in seen:
-                seen.add(u)
+        transcript_parts: List[str] = []
+        seen_urls = set()
+
+        for u in [v["url"] for v in matched_venue] + list(extra_urls or []):
+            if u and u not in seen_urls:
+                seen_urls.add(u)
                 urls.append(u)
+                tx = self._get_cached_transcript(u)
+                if tx:
+                    transcript_parts.append(tx)
 
-        if not urls:
-            return [], ""
+        # Also inspect general daily preview videos whose captions mention >=2 runners in this meeting
+        if runner_names and len(urls) < max_vids:
+            general_candidates = match_general_preview_videos(
+                recent_videos,
+                keywords=gen_keywords,
+                exclude_ids=venue_ids,
+                max_candidates=5,
+            )
+            for v in general_candidates:
+                if len(urls) >= max_vids:
+                    break
+                u = v["url"]
+                if u in seen_urls:
+                    continue
+                tx = self._get_cached_transcript(u)
+                if not tx:
+                    continue
+                mentions = count_runner_mentions(tx, runner_names)
+                if mentions >= min_mentions:
+                    logger.info(
+                        "General YouTube preview [%s] '%s' matched %d runners for %s!",
+                        v["channel"],
+                        v["title"],
+                        mentions,
+                        meeting_name,
+                    )
+                    seen_urls.add(u)
+                    urls.append(u)
+                    transcript_parts.append(tx)
 
-        logger.info("Matched %d YouTube preview video(s) for %s: %s", len(urls), meeting_name, [v["title"] for v in matched])
-        raw_transcript = fetch_transcripts_for_urls(urls, max_chars_per_video=8000)
-        if not raw_transcript:
+        if not transcript_parts:
             return urls, ""
 
-        focused = extract_runner_relevant_snippets(raw_transcript, runner_names or [], max_total_chars=5000)
+        combined_raw = "\n\n".join(transcript_parts)
+        focused = extract_runner_relevant_snippets(combined_raw, runner_names or [], max_total_chars=5000)
         return urls, focused
