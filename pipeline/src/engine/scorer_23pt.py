@@ -759,12 +759,18 @@ def score_race_23pt(
             prep_reason = "Standard preparation weighting."
         audit["target_race_prep"] = {"score": prep_score, "has_data": prize > 0, "reason": prep_reason}
 
-        # 20. YouTube Preview Transcripts (STRICT neutral fallback if absent)
+        # 20. YouTube Preview Transcripts (Atom XML <media:description> + best-effort captions; STRICT neutral fallback if absent)
         if youtube_transcript and r.get("name") and r["name"].lower() in youtube_transcript.lower():
             audit["youtube_transcripts"] = {
                 "score": 6.4,
                 "has_data": True,
-                "reason": f"Mentioned in configured YouTube preview transcript (pending/ready for Gemini sentiment).",
+                "reason": "Mentioned in YouTube preview description/transcript (ready for Gemini sentiment).",
+            }
+        elif youtube_transcript:
+            audit["youtube_transcripts"] = {
+                "score": NEUTRAL_SCORE,
+                "has_data": True,
+                "reason": "YouTube XML preview checked for meeting; runner not singled out (neutral).",
             }
         else:
             audit["youtube_transcripts"] = {"score": NEUTRAL_SCORE, "has_data": False, "reason": NO_DATA_LABEL}

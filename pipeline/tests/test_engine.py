@@ -474,3 +474,101 @@ def test_nsw_freefields_parsers_and_general_youtube_matching():
     cands = match_general_preview_videos(vids, ["best bets", "racing preview"])
     assert len(cands) == 1
     assert count_runner_mentions("We love Stonecrest in R1 and Outta Line in R2.", ["Stonecrest", "Outta Line", "Other"]) == 2
+
+
+def test_youtube_media_description_fallback_when_captions_ip_blocked(monkeypatch):
+    from datetime import datetime, timezone
+    from pipeline.src.engine.gemini_batch import GeminiBatchAnalyzer
+    from pipeline.src.http_client import PoliteHttpClient
+    from pipeline.src.sources import youtube_feed
+    from pipeline.src.sources.youtube_feed import YouTubeFeedDiscovery, parse_youtube_atom_feed
+
+    atom_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <feed xmlns:yt="http://www.youtube.com/xml/schemas/2015"
+          xmlns:media="http://search.yahoo.com/mrss/"
+          xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <yt:videoId>vidDescGeel</yt:videoId>
+        <title>Midweek Best Bets &amp; Form Preview (25/11)</title>
+        <published>2026-11-24T21:00:00+00:00</published>
+        <media:group>
+          <media:description>
+            00:00 Intro
+            02:15 Geelong R1 - Runner 1 looks super sharp off a recent trial.
+            05:30 Geelong R2 - Runner 2 gets the perfect gun run from barrier 2.
+            Subscribe to our channel: https://youtube.com/example
+            Instagram: https://instagram.com/example
+          </media:description>
+        </media:group>
+      </entry>
+      <entry>
+        <yt:videoId>vidPostRace</yt:videoId>
+        <title>Geelong Post-Race Wrap &amp; Winners</title>
+        <published>2026-11-25T07:30:00+00:00</published>
+        <media:group>
+          <media:description>Runner 1 won easily at Geelong.</media:description>
+        </media:group>
+      </entry>
+    </feed>"""
+
+    cutoff = datetime(2026, 11, 25, 1, 0, 0, tzinfo=timezone.utc)
+    recent = parse_youtube_atom_feed(atom_xml, "Racenet", lookback_hours=60, upper_bound_utc=cutoff)
+    assert len(recent) == 1
+    assert recent[0]["video_id"] == "vidDescGeel"
+    assert "Runner 1 looks super sharp" in recent[0]["description"]
+    assert "Subscribe to our channel" not in recent[0]["description"]
+
+    # Simulate Azure / GitHub Actions YouTube caption IP block
+    def _raise_ip_block(urls, max_chars_per_video=8000):
+        raise RuntimeError("YouTube is blocking requests from your IP (cloud provider)")
+
+    monkeypatch.setattr(youtube_feed, "fetch_transcripts_for_urls", _raise_ip_block)
+
+    disc = YouTubeFeedDiscovery(PoliteHttpClient())
+    # 1) Venue match in <media:description> succeeds despite IP block
+    urls, text = disc.fetch_meeting_transcript(
+        recent_videos=recent,
+        meeting_name="Geelong",
+        aliases=["Ladbrokes Geelong"],
+        runner_names=["Runner 1", "Runner 2", "Runner 3"],
+    )
+    assert urls == ["https://www.youtube.com/watch?v=vidDescGeel"]
+    assert "Runner 1 looks super sharp" in text
+
+    # 2) Runner-mention match (>=2 runners in <media:description>) succeeds even when venue name differs
+    urls_gen, text_gen = disc.fetch_meeting_transcript(
+        recent_videos=recent,
+        meeting_name="Hawkesbury",
+        aliases=[],
+        runner_names=["Runner 1", "Runner 2", "Runner 3"],
+    )
+    assert urls_gen == ["https://www.youtube.com/watch?v=vidDescGeel"]
+    assert "Runner 2 gets the perfect gun run" in text_gen
+
+    # 3) #23 youtube_transcripts flips LIVE for mentioned runners & stays anti-hallucination locked at 5.0 for unmentioned
+    race = _sample_race(field_size=8)
+    track_meta = {"name": "Geelong", "home_straight_m": 350, "turning": "Anti-clockwise"}
+    weather = {"source": "BOM Hourly API", "headwind_kmh": 0.0, "wind_speed_kmh": 5.0, "rain_expected_mm": 0.0, "effect": "Calm"}
+    race["scored_runners"] = score_race_23pt(race, track_meta, weather, youtube_transcript=text)
+
+    r1 = next(r for r in race["scored_runners"] if r["runner_number"] == 1)
+    r3 = next(r for r in race["scored_runners"] if r["runner_number"] == 3)
+    f23_r1 = next(a for a in r1["audit_23pt"] if a["key"] == "youtube_transcripts")
+    f23_r3 = next(a for a in r3["audit_23pt"] if a["key"] == "youtube_transcripts")
+    assert f23_r1["has_data"] is True and f23_r1["score"] == 6.4
+    assert f23_r3["has_data"] is True and f23_r3["score"] == NEUTRAL_SCORE
+
+    # Gemini must NOT be able to override unmentioned runner #3 away from 5.0, while runner #1 can be refined
+    analyzer = GeminiBatchAnalyzer(api_key="")
+    ai_race = {
+        "race_id": race["race_id"],
+        "runners": [
+            {"runner_number": 1, "factor_overrides": {"youtube_transcripts": {"score": 8.0, "reason": "Praised in YouTube preview."}}},
+            {"runner_number": 3, "factor_overrides": {"youtube_transcripts": {"score": 9.0, "reason": "Hallucinated praise."}}},
+        ],
+    }
+    analyzer._apply_validated_overrides(race, ai_race, youtube_transcript=text)
+    f23_r1_after = next(a for r in race["scored_runners"] if r["runner_number"] == 1 for a in r["audit_23pt"] if a["key"] == "youtube_transcripts")
+    f23_r3_after = next(a for r in race["scored_runners"] if r["runner_number"] == 3 for a in r["audit_23pt"] if a["key"] == "youtube_transcripts")
+    assert f23_r1_after["score"] > 7.0
+    assert f23_r3_after["score"] == NEUTRAL_SCORE

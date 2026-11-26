@@ -231,9 +231,27 @@ class GeminiBatchAnalyzer:
                     item["reason"] = NO_DATA_LABEL
                 elif key in allowed_override_keys and key in overrides and isinstance(overrides[key], dict):
                     ov = overrides[key]
-                    if key == "youtube_transcripts" and not youtube_transcript:
-                        item["score"] = NEUTRAL_SCORE
-                        item["reason"] = NO_DATA_LABEL
+                    if key == "youtube_transcripts":
+                        runner_mentioned = bool(
+                            youtube_transcript
+                            and runner.get("name")
+                            and str(runner["name"]).lower() in youtube_transcript.lower()
+                        )
+                        if not youtube_transcript:
+                            item["score"] = NEUTRAL_SCORE
+                            item["reason"] = NO_DATA_LABEL
+                        elif not runner_mentioned:
+                            # Keep audited meeting-level neutral 5.0 strictly protected against hallucination
+                            item["score"] = NEUTRAL_SCORE
+                        else:
+                            try:
+                                new_sc = clamp(float(ov.get("score", item["score"])))
+                                item["score"] = clamp(0.6 * new_sc + 0.4 * float(item["score"]))
+                            except (TypeError, ValueError):
+                                pass
+                            ov_reason = str(ov.get("reason") or "").strip()
+                            if ov_reason:
+                                item["reason"] = ov_reason[:160]
                     else:
                         try:
                             new_sc = clamp(float(ov.get("score", item["score"])))
