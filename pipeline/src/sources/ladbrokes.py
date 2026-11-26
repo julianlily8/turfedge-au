@@ -223,7 +223,11 @@ class LadbrokesSource:
                     "age": int(r.get("age") or 0),
                     "sex": (r.get("sex") or "").strip(),
                     "prize_money": _safe_float(r.get("prize_money"), 0.0),
-                    "last_twenty_starts": (r.get("last_twenty_starts") or "").strip(),
+                    "last_twenty_starts": (
+                        r.get("last_twenty_starts")
+                        if isinstance(r.get("last_twenty_starts"), list)
+                        else (r.get("last_twenty_starts") or "").strip()
+                    ),
                     "silk_url": r.get("silk_url_64x64") or r.get("silk_url_128x128") or "",
                     "favourite": bool(r.get("favourite", False)),
                     "mover": bool(r.get("mover", False)),

@@ -405,6 +405,253 @@ def _parse_rail_meters(rail_position: str) -> float:
     return float(m.group(1)) if m else 0.0
 
 
+BAYESIAN_SR_PRIOR = 0.12
+BAYESIAN_PR_PRIOR = 0.32
+BAYESIAN_PRIOR_STARTS = 25.0
+PICNIC_PRIZE_THRESHOLD = 15000.0
+
+
+def bayesian_strike_rate(
+    wins: int,
+    starts: int,
+    prior_sr: float = BAYESIAN_SR_PRIOR,
+    k: float = BAYESIAN_PRIOR_STARTS,
+) -> float:
+    """Apply Empirical Bayes shrinkage toward prior_sr with pseudo-count k."""
+    w = max(0.0, float(wins))
+    s = max(0.0, float(starts))
+    return (w + prior_sr * k) / (s + k)
+
+
+def _extract_structured_runs(runner: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Extract structured past-start dicts from `last_twenty_starts` (if list) first,
+    then fall back to `past_performances` (if list of dicts).
+    """
+    raw_l20 = runner.get("last_twenty_starts")
+    if isinstance(raw_l20, list):
+        runs = [x for x in raw_l20 if isinstance(x, dict)]
+        if runs:
+            return runs
+    raw_pp = runner.get("past_performances")
+    if isinstance(raw_pp, list):
+        runs = [x for x in raw_pp if isinstance(x, dict)]
+        if runs:
+            return runs
+    return []
+
+
+def _last_twenty_string(runner: Dict[str, Any]) -> str:
+    raw_l20 = runner.get("last_twenty_starts")
+    if isinstance(raw_l20, str):
+        return raw_l20.strip()
+    if isinstance(raw_l20, list):
+        chars: List[str] = []
+        for entry in raw_l20:
+            if isinstance(entry, dict):
+                pos = entry.get("position") or entry.get("finishing_position") or entry.get("finish_position")
+                try:
+                    p = int(pos)
+                    if p > 0:
+                        chars.append("0" if p >= 10 else str(p))
+                except (TypeError, ValueError):
+                    pass
+            elif isinstance(entry, str) and entry.strip():
+                chars.append(entry.strip()[0])
+        return "".join(chars)
+    return ""
+
+
+def _parse_run_float(run: Dict[str, Any], *keys: str) -> Optional[float]:
+    for k in keys:
+        val = run.get(k)
+        if val is not None and val != "":
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def _is_picnic_or_non_tab_run(run: Dict[str, Any]) -> bool:
+    if run.get("is_picnic") or run.get("non_tab") or run.get("is_non_tab"):
+        return True
+    prize = _parse_run_float(run, "prize_money", "purse", "prizemoney", "total_prize_money")
+    if prize is not None and 0.0 < prize < PICNIC_PRIZE_THRESHOLD:
+        return True
+    text_blob = " ".join(
+        str(run.get(k) or "") for k in ("venue", "track", "race_name", "race_class", "class", "meeting_type")
+    ).lower()
+    if "picnic" in text_blob or "non-tab" in text_blob or "non tab" in text_blob:
+        return True
+    return False
+
+
+def _score_structured_sectionals(runs: List[Dict[str, Any]]) -> Tuple[float, str]:
+    """
+    Score Adjusted Sectionals (#6) from structured past-run dicts, heavily penalizing:
+      - beaten margins > 10.0L (and severe > 20.0L tail-offs)
+      - last-place finishes in small fields (field_size <= 8)
+      - non-TAB / picnic races (prize_money < $15,000)
+    """
+    recent = runs[:4]
+    if not recent:
+        return NEUTRAL_SCORE, "No prior starts recorded (debutant)."
+
+    # Weight most-recent runs highest (index 0 = most recent if dated desc or default API order)
+    dated = [r for r in recent if r.get("date") or r.get("meeting_date") or r.get("start_time")]
+    if len(dated) == len(recent):
+        recent = sorted(
+            recent,
+            key=lambda x: str(x.get("date") or x.get("meeting_date") or x.get("start_time") or ""),
+            reverse=True,
+        )
+
+    weights = [1.5, 1.1, 0.8, 0.6][: len(recent)]
+    pts = 0.0
+    close_runs = 0
+    severe_tail_offs = 0
+    heavy_margin_runs = 0
+    picnic_runs = 0
+    small_field_lasts = 0
+    worst_margin = 0.0
+
+    for run, w in zip(recent, weights):
+        pos_f = _parse_run_float(run, "position", "finishing_position", "finish_position")
+        pos = int(pos_f) if pos_f is not None and pos_f > 0 else 6
+        margin = _parse_run_float(run, "margin", "margin_length", "beaten_margin")
+        field_sz_f = _parse_run_float(run, "field_size", "starters", "runners_count", "field_count")
+        field_sz = int(field_sz_f) if field_sz_f is not None and field_sz_f > 0 else 0
+        is_picnic = _is_picnic_or_non_tab_run(run)
+
+        if pos == 1:
+            run_sc = 9.5
+        elif pos == 2:
+            run_sc = 8.0
+        elif pos == 3:
+            run_sc = 7.0
+        elif pos <= 5:
+            run_sc = 5.5
+        else:
+            run_sc = max(2.0, 5.0 - (pos - 5) * 0.5)
+
+        if pos > 1 and margin is not None:
+            worst_margin = max(worst_margin, margin)
+            if margin > 20.0:
+                severe_tail_offs += 1
+                run_sc = min(2.2, run_sc - 4.2)
+            elif margin > 10.0:
+                heavy_margin_runs += 1
+                run_sc = min(3.6, run_sc - 2.5)
+            elif margin <= 2.0:
+                close_runs += 1
+                run_sc = min(9.8, run_sc + 0.6)
+
+        if field_sz > 0 and field_sz <= 8 and pos >= field_sz:
+            small_field_lasts += 1
+            run_sc = max(1.2, run_sc - 1.5)
+
+        if is_picnic:
+            picnic_runs += 1
+            run_sc = min(4.4, run_sc - 1.2)
+
+        pts += clamp(run_sc) * w
+
+    score = clamp(pts / sum(weights))
+    if close_runs >= 2 and severe_tail_offs == 0 and picnic_runs == 0:
+        score = clamp(score + 0.7)
+
+    # Strict anti-inflation cap: a >20L tail-off or picnic heavy defeat cannot score above neutral 5.0
+    if severe_tail_offs > 0 or (picnic_runs > 0 and (heavy_margin_runs > 0 or small_field_lasts > 0)):
+        score = min(score, 4.2)
+    elif picnic_runs == len(recent):
+        score = min(score, 4.5)
+
+    flags: List[str] = []
+    if severe_tail_offs > 0:
+        flags.append(f"tail-off beaten {worst_margin:.1f}L")
+    elif heavy_margin_runs > 0:
+        flags.append(f"beaten >10L ({worst_margin:.1f}L)")
+    if small_field_lasts > 0:
+        flags.append(f"last in small field ({small_field_lasts}x)")
+    if picnic_runs > 0:
+        flags.append(f"picnic/non-TAB (<$15k) x{picnic_runs}")
+    if close_runs >= 2 and not flags:
+        flags.append(f"tight margins in {close_runs} of last {len(recent)} runs")
+
+    suffix = f" ({'; '.join(flags)})." if flags else "."
+    return score, f"Structured form ({len(recent)} recent starts) rated {score:.1f}/10{suffix}"
+
+
+def _score_structured_ctd(runs: List[Dict[str, Any]]) -> Tuple[float, str]:
+    """
+    Score Class, Track & Distance (#23) from structured runs with discounts for non-TAB/picnic
+    purses (< $15,000), beaten margins > 10L / > 20L, and last-place finishes in small fields.
+    """
+    if not runs:
+        return NEUTRAL_SCORE, "Unraced debutant — neutral class/distance baseline."
+
+    eff_wins = 0.0
+    eff_places = 0.0
+    raw_wins = 0
+    raw_places = 0
+    starts = 0
+    picnic_count = 0
+    tail_off_penalty = 0.0
+    has_recent_severe_tail_off = False
+
+    for idx, run in enumerate(runs):
+        pos_f = _parse_run_float(run, "position", "finishing_position", "finish_position")
+        if pos_f is None or pos_f <= 0:
+            continue
+        pos = int(pos_f)
+        starts += 1
+        is_picnic = _is_picnic_or_non_tab_run(run)
+        if is_picnic:
+            picnic_count += 1
+        class_weight = 0.25 if is_picnic else 1.0
+
+        if pos == 1:
+            raw_wins += 1
+            raw_places += 1
+            eff_wins += class_weight
+            eff_places += class_weight
+        elif pos in (2, 3):
+            raw_places += 1
+            eff_places += class_weight
+
+        margin = _parse_run_float(run, "margin", "margin_length", "beaten_margin")
+        field_sz_f = _parse_run_float(run, "field_size", "starters", "runners_count", "field_count")
+        field_sz = int(field_sz_f) if field_sz_f is not None and field_sz_f > 0 else 0
+
+        if pos > 1 and margin is not None:
+            if margin > 20.0:
+                tail_off_penalty += 1.4 if idx < 3 else 0.6
+                if idx < 3:
+                    has_recent_severe_tail_off = True
+            elif margin > 10.0:
+                tail_off_penalty += 0.6 if idx < 3 else 0.3
+        if field_sz > 0 and field_sz <= 8 and pos >= field_sz:
+            tail_off_penalty += 0.7 if idx < 3 else 0.3
+
+    if starts == 0:
+        return NEUTRAL_SCORE, "Unraced debutant — neutral class/distance baseline."
+
+    win_rate = eff_wins / starts
+    place_rate = eff_places / starts
+    score = clamp(4.2 + win_rate * 10.0 + place_rate * 3.5 - min(3.0, tail_off_penalty))
+    if has_recent_severe_tail_off or (picnic_count > 0 and picnic_count >= starts / 2.0):
+        score = min(score, 4.5)
+
+    notes: List[str] = []
+    if picnic_count > 0:
+        notes.append(f"{picnic_count} picnic/non-TAB")
+    if tail_off_penalty > 0:
+        notes.append("margin/small-field penalty")
+    extra = f" [{', '.join(notes)}]" if notes else ""
+    return score, f"{raw_wins}W-{raw_places - raw_wins}P from {starts} structured starts{extra}."
+
+
 def _recent_form_score(last_twenty: str) -> Tuple[float, str]:
     """Score finishing string like '06x516x551' (rightmost = most recent)."""
     cleaned = re.sub(r"[^0-9xX]", "", last_twenty or "")
@@ -541,7 +788,8 @@ def score_race_23pt(
         jockey_l = (r.get("jockey") or "").lower()
         trainer_l = (r.get("trainer") or "").lower()
         gear = (r.get("gear") or "").strip()
-        last_twenty = (r.get("last_twenty_starts") or "").strip()
+        structured_runs = _extract_structured_runs(r)
+        last_twenty = _last_twenty_string(r)
         past_perfs = r.get("past_performances") or []
         jockey_perfs = r.get("jockey_past_performances") or []
 
@@ -631,22 +879,14 @@ def score_race_23pt(
             hb_reason = track_meta.get("historical_bias", "Standard fair Australian circuit.")
         audit["historical_track_bias"] = {"score": clamp(hb_score), "has_data": True, "reason": hb_reason}
 
-        # 6. Adjusted Sectionals (derived from past run margins, finish pattern & recent form)
-        sec_score, sec_reason = _recent_form_score(last_twenty)
-        # Boost slightly if recent past performances have close margins (<2L)
-        close_runs = 0
-        for pp in past_perfs[:3]:
-            if isinstance(pp, dict):
-                mg = pp.get("margin") or pp.get("margin_length")
-                try:
-                    if mg is not None and float(mg) <= 2.0:
-                        close_runs += 1
-                except (ValueError, TypeError):
-                    pass
-        if close_runs >= 2:
-            sec_score = clamp(sec_score + 0.9)
-            sec_reason += f" Tight finishing margins in {close_runs} of last 3 runs."
-        audit["adjusted_sectionals"] = {"score": sec_score, "has_data": bool(last_twenty or past_perfs), "reason": sec_reason}
+        # 6. Adjusted Sectionals (structured last_twenty_starts / past_performances first, then string fallback)
+        if structured_runs:
+            sec_score, sec_reason = _score_structured_sectionals(structured_runs)
+            sec_has_data = True
+        else:
+            sec_score, sec_reason = _recent_form_score(last_twenty)
+            sec_has_data = bool(last_twenty)
+        audit["adjusted_sectionals"] = {"score": sec_score, "has_data": sec_has_data, "reason": sec_reason}
 
         # 7. Recent Trials & Jumpouts (NSW FreeFields 21d trials + blog/stewards trial mentions)
         trials = r.get("trial_runs") or []
@@ -711,7 +951,7 @@ def score_race_23pt(
             reason = f"{r.get('sire')} x {r.get('dam') or 'Dam'}" + (f" ({', '.join(ped_notes)})." if ped_notes else " — neutral distance/ground fit.")
             audit["pedigree_suitability"] = {"score": clamp(ped_score), "has_data": True, "reason": reason}
 
-        # 9. Jockey Recent Form (supports Ladbrokes jockey_stats.last_50_starts + elite lookup)
+        # 9. Jockey Recent Form (Bayesian shrinkage: 12% prior, k=25 pseudo-starts)
         j_stats = r.get("jockey_stats") or {}
         last50 = j_stats.get("last_50_starts") if isinstance(j_stats, dict) else None
         j_score = 5.2
@@ -720,32 +960,36 @@ def score_race_23pt(
             st = int(last50["number_of_starts"])
             w = int(last50.get("number_of_wins") or 0)
             p = w + int(last50.get("number_of_seconds") or 0) + int(last50.get("number_of_thirds") or 0)
-            sr = w / st
-            pr = p / st
-            j_score = clamp(4.2 + sr * 18.0 + pr * 3.5 + (0.6 if any(ej in jockey_l for ej in ELITE_JOCKEYS) else 0.0))
-            j_reason += f" ({w}W/{p}P from last {st} rides, {sr*100:.0f}% SR)."
+            raw_sr = w / st
+            bayes_sr = bayesian_strike_rate(w, st)
+            bayes_pr = bayesian_strike_rate(p, st, prior_sr=BAYESIAN_PR_PRIOR)
+            j_score = clamp(4.2 + bayes_sr * 18.0 + bayes_pr * 3.5 + (0.6 if any(ej in jockey_l for ej in ELITE_JOCKEYS) else 0.0))
+            j_reason += f" ({w}W/{p}P from {st} rides, {raw_sr*100:.0f}% raw → {bayes_sr*100:.1f}% Bayes SR)."
         elif any(ej in jockey_l for ej in ELITE_JOCKEYS):
             j_score += 2.4
             j_reason += " (top metro strike-rate rider)."
         elif jockey_perfs:
+            st = len(jockey_perfs)
             wins = sum(1 for jp in jockey_perfs if isinstance(jp, dict) and int(jp.get("position") or 99) == 1)
             places = sum(1 for jp in jockey_perfs if isinstance(jp, dict) and int(jp.get("position") or 99) <= 3)
-            sr = wins / max(len(jockey_perfs), 1)
-            j_score = clamp(4.5 + sr * 12.0 + (places / max(len(jockey_perfs), 1)) * 2.0)
-            j_reason += f" ({wins}W/{places}P in last {len(jockey_perfs)} tracked rides)."
+            bayes_sr = bayesian_strike_rate(wins, st)
+            bayes_pr = bayesian_strike_rate(places, st, prior_sr=BAYESIAN_PR_PRIOR)
+            j_score = clamp(4.5 + bayes_sr * 12.0 + bayes_pr * 2.0)
+            j_reason += f" ({wins}W/{places}P in {st} tracked rides, {bayes_sr*100:.1f}% Bayes SR)."
         else:
             j_reason += " (standard riding profile)."
         audit["jockey_form"] = {"score": clamp(j_score), "has_data": bool(r.get("jockey") and r.get("jockey") != "TBA"), "reason": j_reason}
 
-        # 10. Trainer Recent Form (supports Ladbrokes jockey_stats.trainer combo + elite lookup)
+        # 10. Trainer Recent Form (Bayesian shrinkage: 12% prior, k=25 pseudo-starts)
         tr_combo = j_stats.get("trainer") if isinstance(j_stats, dict) else None
         t_score = 5.2
         if isinstance(tr_combo, dict) and int(tr_combo.get("number_of_starts") or 0) >= 5:
             tst = int(tr_combo["number_of_starts"])
             tw = int(tr_combo.get("number_of_wins") or 0)
-            tsr = tw / tst
-            t_score = clamp(4.5 + tsr * 16.0 + (1.0 if any(et in trainer_l for et in ELITE_TRAINERS) else 0.0))
-            t_reason = f"Stable {r.get('trainer')}: {tw}W/{tst} ({tsr*100:.0f}% SR with jockey)."
+            raw_tsr = tw / tst
+            bayes_tsr = bayesian_strike_rate(tw, tst)
+            t_score = clamp(4.5 + bayes_tsr * 16.0 + (1.0 if any(et in trainer_l for et in ELITE_TRAINERS) else 0.0))
+            t_reason = f"Stable {r.get('trainer')}: {tw}W/{tst} ({raw_tsr*100:.0f}% raw → {bayes_tsr*100:.1f}% Bayes SR with jockey)."
         elif any(et in trainer_l for et in ELITE_TRAINERS):
             t_score = 7.6
             t_reason = f"Leading stable ({r.get('trainer')})."
@@ -985,19 +1229,24 @@ def score_race_23pt(
             bar_reason = f"Wide gate (Barrier {barrier}/{field_size}) risks covering extra ground."
         audit["barrier_geometry"] = {"score": clamp(bar_score), "has_data": barrier > 0, "reason": bar_reason}
 
-        # 23. Class, Track & Distance Record
-        wins_total = last_twenty.count("1")
-        places_total = wins_total + last_twenty.count("2") + last_twenty.count("3")
-        starts_total = sum(1 for c in last_twenty if c.isdigit())
-        if starts_total > 0:
-            win_rate = wins_total / starts_total
-            place_rate = places_total / starts_total
-            ctd_score = clamp(4.2 + win_rate * 10.0 + place_rate * 3.5)
-            ctd_reason = f"{wins_total}W-{places_total - wins_total}P from last {starts_total} tracked starts (Win {win_rate*100:.0f}%)."
+        # 23. Class, Track & Distance Record (structured starts first, then string fallback)
+        if structured_runs:
+            ctd_score, ctd_reason = _score_structured_ctd(structured_runs)
+            ctd_has_data = True
         else:
-            ctd_score = NEUTRAL_SCORE
-            ctd_reason = "Unraced debutant — neutral class/distance baseline."
-        audit["class_track_distance"] = {"score": ctd_score, "has_data": starts_total > 0, "reason": ctd_reason}
+            wins_total = last_twenty.count("1")
+            places_total = wins_total + last_twenty.count("2") + last_twenty.count("3")
+            starts_total = sum(1 for c in last_twenty if c.isdigit())
+            if starts_total > 0:
+                win_rate = wins_total / starts_total
+                place_rate = places_total / starts_total
+                ctd_score = clamp(4.2 + win_rate * 10.0 + place_rate * 3.5)
+                ctd_reason = f"{wins_total}W-{places_total - wins_total}P from last {starts_total} tracked starts (Win {win_rate*100:.0f}%)."
+            else:
+                ctd_score = NEUTRAL_SCORE
+                ctd_reason = "Unraced debutant — neutral class/distance baseline."
+            ctd_has_data = starts_total > 0
+        audit["class_track_distance"] = {"score": ctd_score, "has_data": ctd_has_data, "reason": ctd_reason}
 
         # Assemble ordered 23-point audit list & composite score
         audit_list = []
@@ -1025,6 +1274,7 @@ def score_race_23pt(
         composite_100 = round((composite / total_weight) * 100.0, 2)
 
         enriched = dict(r)
+        enriched["last_twenty_starts"] = last_twenty
         enriched["market_fluc"] = fluc
         enriched["audit_23pt"] = audit_list
         enriched["composite_score"] = composite_100

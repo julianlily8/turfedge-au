@@ -7,10 +7,20 @@ from typing import Any, Dict, List, Optional
 from pipeline.src.engine.scorer_23pt import load_factor_weights
 
 SRM_CORRELATION_HAIRCUT = 0.75
+MIN_SRM_ODDS = 1.80
 UNIT_STAKE = 10.0
 SHORT_FAV_ODDS_THRESHOLD = 2.30
 TAB_EXOTIC_POOL_FACTOR = 0.79
 MIN_EXOTIC_PROJECTED_RETURN = 12.50
+
+# Two-tier market ceiling for $31+ outsiders
+OUTSIDER_ODDS_THRESHOLD = 31.0
+OUTSIDER_TIER1_MAX_MULT = 2.5
+OUTSIDER_TIER2_MAX_MULT = 8.5
+OUTSIDER_TIER1_FLUC_CUTOFF = 25.0
+OUTSIDER_TIER2_MIN_FLUC_PCT = 30.0
+OUTSIDER_MIN_COMPOSITE = 55.0
+OUTSIDER_TIER2_MIN_RATED_PRICE = 10.00
 
 MIN_EXOTIC_RUNNERS = {
     "exacta": 6,
@@ -124,15 +134,66 @@ def price_and_generate_bets(race: Dict[str, Any], weights_cfg: Optional[Dict[str
     if mkt_sum > 0.5:
         mkt_probs = [p / mkt_sum for p in raw_mkt]
         blended = [0.72 * mp + 0.28 * kp for mp, kp in zip(model_probs, mkt_probs)]
-    else:
-        blended = model_probs
 
-    b_sum = sum(blended) or 1.0
-    win_probs = [p / b_sum for p in blended]
+        # Two-tier market ceiling for $31+ outsiders:
+        # - Tier 1 (fluc < +25% OR composite < 55.0): cap at 2.5x market-implied probability
+        # - Tier 2 (fluc >= +30% AND composite >= 55.0): allow up to 8.5x market-implied prob with $10.00 Rated Price floor
+        # - Transition (+25% <= fluc < +30% AND composite >= 55.0): cap at 4.0x market-implied probability
+        caps: List[Optional[float]] = []
+        for r, kp in zip(runners, mkt_probs):
+            lv = float(r.get("live_win") or 0.0)
+            fluc_pct = float((r.get("market_fluc") or {}).get("fluc_pct") or 0.0)
+            comp = float(r.get("composite_score") or 0.0)
+            if lv >= OUTSIDER_ODDS_THRESHOLD and kp > 0.0:
+                if fluc_pct >= OUTSIDER_TIER2_MIN_FLUC_PCT and comp >= OUTSIDER_MIN_COMPOSITE:
+                    caps.append(min(OUTSIDER_TIER2_MAX_MULT * kp, 1.0 / OUTSIDER_TIER2_MIN_RATED_PRICE))
+                elif fluc_pct < OUTSIDER_TIER1_FLUC_CUTOFF or comp < OUTSIDER_MIN_COMPOSITE:
+                    caps.append(OUTSIDER_TIER1_MAX_MULT * kp)
+                else:
+                    caps.append(min(4.0 * kp, 1.0 / OUTSIDER_TIER2_MIN_RATED_PRICE))
+            else:
+                caps.append(None)
+
+        # Iterative water-filling normalization so capped $31+ runners never exceed their cap
+        # after renormalization while total win probabilities still sum cleanly to 1.0.
+        win_probs = list(blended)
+        locked = [False] * len(win_probs)
+        for _ in range(4):
+            locked_mass = sum(win_probs[i] for i in range(len(win_probs)) if locked[i])
+            free_mass = sum(win_probs[i] for i in range(len(win_probs)) if not locked[i])
+            remaining_mass = max(1e-6, 1.0 - locked_mass)
+            if free_mass <= 0:
+                break
+            scale = remaining_mass / free_mass
+            any_newly_locked = False
+            for i in range(len(win_probs)):
+                if not locked[i]:
+                    scaled_p = win_probs[i] * scale
+                    if caps[i] is not None and scaled_p > caps[i] + 1e-9:
+                        win_probs[i] = caps[i]
+                        locked[i] = True
+                        any_newly_locked = True
+                    else:
+                        win_probs[i] = scaled_p
+            if not any_newly_locked:
+                break
+    else:
+        b_sum = sum(model_probs) or 1.0
+        win_probs = [p / b_sum for p in model_probs]
+
     harville = _harville_top_k_probs(win_probs)
 
     for idx, (r, h) in enumerate(zip(runners, harville)):
         rated_price = round(min(151.0, max(1.05, 1.0 / max(h["win"], 1e-4))), 2)
+        lv_check = float(r.get("live_win") or 0.0)
+        fluc_check = float((r.get("market_fluc") or {}).get("fluc_pct") or 0.0)
+        comp_check = float(r.get("composite_score") or 0.0)
+        if (
+            lv_check >= OUTSIDER_ODDS_THRESHOLD
+            and fluc_check >= OUTSIDER_TIER2_MIN_FLUC_PCT
+            and comp_check >= OUTSIDER_MIN_COMPOSITE
+        ):
+            rated_price = max(OUTSIDER_TIER2_MIN_RATED_PRICE, rated_price)
         live_win = round(float(r.get("live_win") or 0.0), 2)
         opening_win = round(float(r.get("opening_win") or 0.0), 2)
         # Strict Value Overlay condition: triggered ONLY when Live Price > Model Rated Price
@@ -203,6 +264,33 @@ def price_and_generate_bets(race: Dict[str, Any], weights_cfg: Optional[Dict[str
     }
 
 
+def _make_srm_combo(
+    leg_count: int,
+    label: str,
+    legs: List[Dict[str, Any]],
+    fair_mult: float,
+    discounted_odds: float,
+    haircut: float,
+) -> Dict[str, Any]:
+    is_skipped = discounted_odds < MIN_SRM_ODDS
+    skip_reason = (
+        f"Skipped: Est. odds ${discounted_odds:.2f} < ${MIN_SRM_ODDS:.2f} min (low payout)"
+        if is_skipped
+        else None
+    )
+    return {
+        "leg_count": leg_count,
+        "label": label,
+        "legs": legs,
+        "raw_harville_odds": round(fair_mult, 2),
+        "haircut_factor": haircut,
+        "estimated_odds": discounted_odds,
+        "unit_stake": 0.0 if is_skipped else UNIT_STAKE,
+        "skipped": is_skipped,
+        "skip_reason": skip_reason,
+    }
+
+
 def _build_srm_combos(runners: List[Dict[str, Any]], haircut: float) -> List[Dict[str, Any]]:
     combos: List[Dict[str, Any]] = []
     n = len(runners)
@@ -214,18 +302,17 @@ def _build_srm_combos(runners: List[Dict[str, Any]], haircut: float) -> List[Dic
         fair_mult = 1.0 / raw_prob
         discounted_odds = round(max(1.25, fair_mult * haircut), 2)
         combos.append(
-            {
-                "leg_count": 2,
-                "label": "2-Leg SRM",
-                "legs": [
+            _make_srm_combo(
+                leg_count=2,
+                label="2-Leg SRM",
+                legs=[
                     {"runner_number": r1["runner_number"], "name": r1["name"], "market": "Top 2", "prob": r1["probabilities"]["top2"]},
                     {"runner_number": r2["runner_number"], "name": r2["name"], "market": "Top 3", "prob": r2["probabilities"]["top3"]},
                 ],
-                "raw_harville_odds": round(fair_mult, 2),
-                "haircut_factor": haircut,
-                "estimated_odds": discounted_odds,
-                "unit_stake": UNIT_STAKE,
-            }
+                fair_mult=fair_mult,
+                discounted_odds=discounted_odds,
+                haircut=haircut,
+            )
         )
 
     # 3-leg SRM: #1 Top 2 + #2 Top 3 + #3 Top 4
@@ -233,21 +320,20 @@ def _build_srm_combos(runners: List[Dict[str, Any]], haircut: float) -> List[Dic
         r1, r2, r3 = runners[0], runners[1], runners[2]
         raw_prob = max(0.005, r1["probabilities"]["top2"] * r2["probabilities"]["top3"] * r3["probabilities"]["top4"])
         fair_mult = 1.0 / raw_prob
-        discounted_odds = round(max(1.5, fair_mult * haircut), 2)
+        discounted_odds = round(max(1.50, fair_mult * haircut), 2)
         combos.append(
-            {
-                "leg_count": 3,
-                "label": "3-Leg SRM",
-                "legs": [
+            _make_srm_combo(
+                leg_count=3,
+                label="3-Leg SRM",
+                legs=[
                     {"runner_number": r1["runner_number"], "name": r1["name"], "market": "Top 2", "prob": r1["probabilities"]["top2"]},
                     {"runner_number": r2["runner_number"], "name": r2["name"], "market": "Top 3", "prob": r2["probabilities"]["top3"]},
                     {"runner_number": r3["runner_number"], "name": r3["name"], "market": "Top 4", "prob": r3["probabilities"]["top4"]},
                 ],
-                "raw_harville_odds": round(fair_mult, 2),
-                "haircut_factor": haircut,
-                "estimated_odds": discounted_odds,
-                "unit_stake": UNIT_STAKE,
-            }
+                fair_mult=fair_mult,
+                discounted_odds=discounted_odds,
+                haircut=haircut,
+            )
         )
 
     # 4-leg SRM: #1 Top 2 + #2 Top 3 + #3 Top 4 + #4 Top 4
@@ -261,22 +347,21 @@ def _build_srm_combos(runners: List[Dict[str, Any]], haircut: float) -> List[Dic
             * r4["probabilities"]["top4"],
         )
         fair_mult = 1.0 / raw_prob
-        discounted_odds = round(max(2.0, fair_mult * haircut), 2)
+        discounted_odds = round(max(1.50, fair_mult * haircut), 2)
         combos.append(
-            {
-                "leg_count": 4,
-                "label": "4-Leg SRM",
-                "legs": [
+            _make_srm_combo(
+                leg_count=4,
+                label="4-Leg SRM",
+                legs=[
                     {"runner_number": r1["runner_number"], "name": r1["name"], "market": "Top 2", "prob": r1["probabilities"]["top2"]},
                     {"runner_number": r2["runner_number"], "name": r2["name"], "market": "Top 3", "prob": r2["probabilities"]["top3"]},
                     {"runner_number": r3["runner_number"], "name": r3["name"], "market": "Top 4", "prob": r3["probabilities"]["top4"]},
                     {"runner_number": r4["runner_number"], "name": r4["name"], "market": "Top 4", "prob": r4["probabilities"]["top4"]},
                 ],
-                "raw_harville_odds": round(fair_mult, 2),
-                "haircut_factor": haircut,
-                "estimated_odds": discounted_odds,
-                "unit_stake": UNIT_STAKE,
-            }
+                fair_mult=fair_mult,
+                discounted_odds=discounted_odds,
+                haircut=haircut,
+            )
         )
 
     return combos

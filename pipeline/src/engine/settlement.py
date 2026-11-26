@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pipeline.src.engine.pricing import SRM_CORRELATION_HAIRCUT, UNIT_STAKE
+from pipeline.src.engine.pricing import MIN_SRM_ODDS, SRM_CORRELATION_HAIRCUT, UNIT_STAKE
 from pipeline.src.sources.betfair_bsp import normalize_horse_name
 
 
@@ -108,9 +108,17 @@ def settle_race(
         if win_sel.get("is_value_overlay"):
             overlay_bet = dict(win_bet, category="win_overlay")
 
-    # Same Race Multi settlement (with 0.75x correlation haircut & scratching/missing-position voiding)
+    # Same Race Multi settlement (with 0.75x correlation haircut, $1.80 min odds gate & scratching/missing-position voiding)
     srm_settlements: List[Dict[str, Any]] = []
     for combo in race.get("srm_combos") or []:
+        raw_harville = float(combo.get("raw_harville_odds") or combo.get("estimated_odds") or 1.0)
+        haircut = float(combo.get("haircut_factor") or SRM_CORRELATION_HAIRCUT)
+        est_odds = round(float(combo.get("estimated_odds") or max(1.25, raw_harville * haircut)), 2)
+
+        # Never stake or count skipped low-odds (< $1.80) SRMs in Tab 2 POT%
+        if combo.get("skipped") or float(combo.get("unit_stake", UNIT_STAKE)) <= 0.0 or est_odds < MIN_SRM_ODDS:
+            continue
+
         legs = combo.get("legs") or []
         leg_void = (not legs) or any(
             (int(leg["runner_number"]) in scratched_set)
@@ -118,9 +126,6 @@ def settle_race(
             or (pos_map.get(int(leg["runner_number"])) <= 0)
             for leg in legs
         )
-        raw_harville = float(combo.get("raw_harville_odds") or combo.get("estimated_odds") or 1.0)
-        haircut = float(combo.get("haircut_factor") or SRM_CORRELATION_HAIRCUT)
-        est_odds = round(float(combo.get("estimated_odds") or max(1.25, raw_harville * haircut)), 2)
 
         if leg_void:
             all_won = False

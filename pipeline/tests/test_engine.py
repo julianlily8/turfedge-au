@@ -662,3 +662,104 @@ def test_meeting_bias_pace_style_normalization_and_progressive_shifts():
     f4_close_sw = next(a for r in next_race["scored_runners"] if r["runner_number"] == 2 for a in r["audit_23pt"] if a["key"] == "current_meeting_bias")
     assert f4_close_sw["score"] == 8.0  # +2.0 Swoopers +1.0 Outside
     assert f4_lead_sw["score"] == 3.6   # -1.4 Leader penalty
+
+
+def test_srm_min_odds_gate_picnic_margin_bayesian_and_two_tier_outsider_ceiling():
+    from pipeline.src.engine.pricing import MIN_SRM_ODDS
+    from pipeline.src.engine.scorer_23pt import bayesian_strike_rate
+
+    # 1) Bayesian shrinkage: 3/10 (30% raw) -> 17.1%, while 23/124 (18.5% raw) -> 17.4% (higher!)
+    sr_small = bayesian_strike_rate(3, 10)
+    sr_estab = bayesian_strike_rate(23, 124)
+    assert abs(sr_small - (6.0 / 35.0)) < 1e-6
+    assert abs(sr_estab - (26.0 / 149.0)) < 1e-6
+    assert sr_estab > sr_small
+
+    # 2) Structured last_twenty_starts picnic / beaten-margin / small-field last-place penalties
+    track_meta = {"name": "Mornington", "home_straight_m": 250, "turning": "Anti-clockwise"}
+    weather = {"source": "BOM Hourly API", "headwind_kmh": 0.0, "wind_speed_kmh": 5.0, "rain_expected_mm": 0.0, "effect": "Calm"}
+    race = _sample_race(field_size=8)
+    # Runner 4 mimics Fulhamzedge: Balranald picnic tail-off (39.92L, 6th of 6, $7,000 purse) + small-sample 3/10 trainer
+    race["runners"][3]["last_twenty_starts"] = [
+        {"date": "2026-11-18", "venue": "Balranald", "position": 6, "field_size": 6, "margin": 39.92, "prize_money": 7000},
+        {"date": "2026-11-05", "venue": "Balranald Picnic", "position": 2, "field_size": 5, "margin": 3.5, "prize_money": 6000},
+    ]
+    race["runners"][3]["jockey_stats"] = {
+        "last_50_starts": {"number_of_starts": 50, "number_of_wins": 7, "number_of_seconds": 6, "number_of_thirds": 8},
+        "trainer": {"number_of_starts": 10, "number_of_wins": 3, "number_of_seconds": 0, "number_of_thirds": 0},
+    }
+    # Runner 8 mimics established yard 23/124
+    race["runners"][7]["jockey_stats"] = {
+        "last_50_starts": {"number_of_starts": 50, "number_of_wins": 9, "number_of_seconds": 4, "number_of_thirds": 7},
+        "trainer": {"number_of_starts": 124, "number_of_wins": 23, "number_of_seconds": 9, "number_of_thirds": 10},
+    }
+
+    scored = score_race_23pt(race, track_meta, weather)
+    r4 = next(r for r in scored if r["runner_number"] == 4)
+    r8 = next(r for r in scored if r["runner_number"] == 8)
+    r4_aud = {a["key"]: a for a in r4["audit_23pt"]}
+    r8_aud = {a["key"]: a for a in r8["audit_23pt"]}
+
+    assert r4_aud["adjusted_sectionals"]["score"] < NEUTRAL_SCORE
+    assert r4_aud["class_track_distance"]["score"] < NEUTRAL_SCORE
+    assert "39.9L" in r4_aud["adjusted_sectionals"]["reason"]
+    assert "17.1% Bayes SR" in r4_aud["trainer_form"]["reason"]
+    assert r8_aud["trainer_form"]["score"] >= r4_aud["trainer_form"]["score"]
+
+    # 3) Two-tier $31+ market ceiling: Tier 1 ($61 non-firmer) capped at 2.5x; Tier 2 ($91 sharp firmer) allowed up to 8.5x with >=$10 floor
+    pricing_race = {
+        "race_id": "race-ceiling-test",
+        "scored_runners": [
+            {"runner_number": 1, "name": "Fav One", "barrier": 1, "jockey": "J1", "trainer": "T1", "composite_score": 59.0, "opening_win": 3.0, "live_win": 2.4, "market_fluc": {"direction": "Firmer", "fluc_pct": 25.0}},
+            {"runner_number": 2, "name": "Sec Fav", "barrier": 2, "jockey": "J2", "trainer": "T2", "composite_score": 56.5, "opening_win": 3.5, "live_win": 3.0, "market_fluc": {"direction": "Firmer", "fluc_pct": 16.7}},
+            {"runner_number": 3, "name": "Mid Chance", "barrier": 3, "jockey": "J3", "trainer": "T3", "composite_score": 54.0, "opening_win": 7.0, "live_win": 7.0, "market_fluc": {"direction": "Steady", "fluc_pct": 0.0}},
+            {"runner_number": 5, "name": "Fourth Chance", "barrier": 5, "jockey": "J5", "trainer": "T5", "composite_score": 53.0, "opening_win": 10.0, "live_win": 10.0, "market_fluc": {"direction": "Steady", "fluc_pct": 0.0}},
+            {"runner_number": 4, "name": "Fulhamzedge", "barrier": 4, "jockey": "J4", "trainer": "T4", "composite_score": 58.0, "opening_win": 67.0, "live_win": 61.0, "market_fluc": {"direction": "Firmer", "fluc_pct": 9.8}},
+            {"runner_number": 8, "name": "Just Jean", "barrier": 8, "jockey": "J8", "trainer": "T8", "composite_score": 56.5, "opening_win": 126.0, "live_win": 91.0, "market_fluc": {"direction": "Firmer", "fluc_pct": 38.5}},
+            {"runner_number": 6, "name": "No Hope", "barrier": 6, "jockey": "J6", "trainer": "T6", "composite_score": 48.0, "opening_win": 51.0, "live_win": 51.0, "market_fluc": {"direction": "Steady", "fluc_pct": 0.0}},
+        ],
+    }
+    priced = price_and_generate_bets(pricing_race)
+    top_by_num = {r["runner_number"]: r for r in pricing_race["scored_runners"]}
+    # Tier 1 $61 non-firmer (#4 Fulhamzedge) must drop out of Top 4
+    assert top_by_num[4]["rank"] > 4
+    assert top_by_num[4]["rated_price"] > 20.0
+    # Tier 2 $91 sharp firmer (#8 Just Jean) gets 8.5x allowance (>= $10.00 Rated Price floor) & beats Tier 1 outsider
+    assert top_by_num[8]["rated_price"] >= 10.00
+    assert top_by_num[8]["probabilities"]["win"] > top_by_num[4]["probabilities"]["win"]
+
+    # 4) $1.80 SRM minimum odds gate (e.g. Hawkesbury R1 $1.25 2-Leg SRM)
+    low_srm_race = {
+        "race_id": "race-low-srm",
+        "date": "2026-11-26",
+        "meeting_slug": "hawkesbury",
+        "meeting_name": "Hawkesbury",
+        "race_number": 1,
+        "name": "Low Odds SRM Test",
+        "scored_runners": [
+            {"runner_number": 5, "name": "Odds On A", "barrier": 1, "jockey": "J1", "trainer": "T1", "composite_score": 76.0, "opening_win": 1.35, "live_win": 1.25, "market_fluc": {"direction": "Firmer", "fluc_pct": 8.0}},
+            {"runner_number": 4, "name": "Odds On B", "barrier": 2, "jockey": "J2", "trainer": "T2", "composite_score": 71.0, "opening_win": 2.40, "live_win": 2.20, "market_fluc": {"direction": "Firmer", "fluc_pct": 9.1}},
+            {"runner_number": 6, "name": "Third Fav", "barrier": 3, "jockey": "J3", "trainer": "T3", "composite_score": 55.0, "opening_win": 9.0, "live_win": 10.0, "market_fluc": {"direction": "Drifter", "fluc_pct": -10.0}},
+            {"runner_number": 1, "name": "Fourth", "barrier": 4, "jockey": "J4", "trainer": "T4", "composite_score": 50.0, "opening_win": 15.0, "live_win": 18.0, "market_fluc": {"direction": "Drifter", "fluc_pct": -16.7}},
+            {"runner_number": 2, "name": "Fifth", "barrier": 5, "jockey": "J5", "trainer": "T5", "composite_score": 44.0, "opening_win": 31.0, "live_win": 41.0, "market_fluc": {"direction": "Drifter", "fluc_pct": -24.4}},
+        ],
+    }
+    p_low = price_and_generate_bets(low_srm_race)
+    srm2 = next(s for s in p_low["srm_combos"] if s["leg_count"] == 2)
+    assert srm2["estimated_odds"] < MIN_SRM_ODDS
+    assert srm2["skipped"] is True
+    assert srm2["unit_stake"] == 0.0
+    assert srm2["skip_reason"] == f"Skipped: Est. odds ${srm2['estimated_odds']:.2f} < $1.80 min (low payout)"
+
+    # Excluded from settle_race so it is never staked or counted as a loss in Tab 2
+    low_srm_race.update(p_low)
+    results = [
+        {"position": 1, "runner_number": 1, "name": "Fourth", "barrier": 4, "margin_length": 0.0},
+        {"position": 2, "runner_number": 2, "name": "Fifth", "barrier": 5, "margin_length": 1.0},
+        {"position": 3, "runner_number": 6, "name": "Third Fav", "barrier": 3, "margin_length": 2.0},
+        {"position": 4, "runner_number": 4, "name": "Odds On B", "barrier": 2, "margin_length": 3.0},
+        {"position": 5, "runner_number": 5, "name": "Odds On A", "barrier": 1, "margin_length": 4.0},
+    ]
+    settled = settle_race(low_srm_race, results, {"best_tote_win": {"1": 18.0}})
+    settled_srm_legs = {s["leg_count"] for s in settled["srm"]}
+    assert 2 not in settled_srm_legs

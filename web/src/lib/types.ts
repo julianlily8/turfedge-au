@@ -107,6 +107,8 @@ export interface SrmCombo {
   haircut_factor: number;
   estimated_odds: number;
   unit_stake: number;
+  skipped?: boolean;
+  skip_reason?: string | null;
 }
 
 export interface ExoticTicket {
@@ -261,6 +263,8 @@ export interface SettledSrmBet {
   stake: number;
   won: boolean;
   void?: boolean;
+  skipped?: boolean;
+  skip_reason?: string | null;
   raw_harville_odds: number;
   haircut_factor: number;
   settled_odds: number;

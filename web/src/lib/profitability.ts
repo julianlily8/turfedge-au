@@ -283,6 +283,7 @@ export function getLedgerBetDetails(
   }
 
   (s.srm || []).forEach((srm) => {
+    if (srm.skipped || (srm.stake <= 0 && !srm.void)) return;
     const betKey = `srm_${srm.leg_count}leg`;
     const isVoid = Boolean(srm.void || srm.stake <= 0);
     const oKey = overrideKey(s.settlement_id, betKey);
@@ -523,7 +524,7 @@ export function computeProfitability(
     }
 
     (s.srm || []).forEach((srm) => {
-      if (srm.void || srm.stake <= 0) return;
+      if (srm.void || srm.skipped || srm.stake <= 0) return;
       const key = `srm_${srm.leg_count}leg`;
       const ov = overrides[overrideKey(s.settlement_id, key)];
       const ret = effectiveReturn(srm.won, srm.stake, srm.return, ov);

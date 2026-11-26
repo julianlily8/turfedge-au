@@ -463,29 +463,59 @@ export function TabUpcoming({
                   <span className="text-[10px] text-slate-400">$10 Unit Stake</span>
                 </div>
                 <div className="space-y-2.5">
-                  {(activeRace.srm_combos || []).map((srm) => (
-                    <div key={srm.leg_count} className="rounded-xl border border-slate-800 bg-slate-950/70 p-2.5">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold text-sky-300">{srm.label}</span>
-                        <span className="text-xs font-bold text-emerald-300 tabular-nums">
-                          Est. ${srm.estimated_odds.toFixed(2)}{' '}
-                          <span className="text-[10px] font-normal text-slate-500">
-                            (raw ${srm.raw_harville_odds.toFixed(2)})
-                          </span>
-                        </span>
-                      </div>
-                      <ul className="mt-1.5 space-y-0.5 text-[11px] text-slate-300">
-                        {srm.legs.map((leg, i) => (
-                          <li key={i} className="flex justify-between">
-                            <span>
-                              #{leg.runner_number} {leg.name} — <strong>{leg.market}</strong>
+                  {(activeRace.srm_combos || []).map((srm) => {
+                    if (srm.skipped) {
+                      return (
+                        <div
+                          key={srm.leg_count}
+                          className="rounded-xl border border-slate-800/80 bg-slate-950/40 p-2.5 opacity-75"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-semibold text-slate-400">{srm.label}</span>
+                            <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-bold uppercase text-amber-300 ring-1 ring-amber-500/30">
+                              SKIP · LOW ODDS
                             </span>
-                            <span className="tabular-nums text-slate-400">{(leg.prob * 100).toFixed(0)}%</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  ))}
+                          </div>
+                          <p className="mt-1 text-[11px] text-slate-500">
+                            {srm.skip_reason || `Skipped: Est. odds $${srm.estimated_odds.toFixed(2)} < $1.80 min (low payout)`}
+                          </p>
+                          <ul className="mt-1.5 space-y-0.5 text-[11px] text-slate-500">
+                            {srm.legs.map((leg, i) => (
+                              <li key={i} className="flex justify-between">
+                                <span>
+                                  #{leg.runner_number} {leg.name} — {leg.market}
+                                </span>
+                                <span className="tabular-nums">{(leg.prob * 100).toFixed(0)}%</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      );
+                    }
+                    return (
+                      <div key={srm.leg_count} className="rounded-xl border border-slate-800 bg-slate-950/70 p-2.5">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold text-sky-300">{srm.label}</span>
+                          <span className="text-xs font-bold text-emerald-300 tabular-nums">
+                            Est. ${srm.estimated_odds.toFixed(2)}{' '}
+                            <span className="text-[10px] font-normal text-slate-500">
+                              (raw ${srm.raw_harville_odds.toFixed(2)})
+                            </span>
+                          </span>
+                        </div>
+                        <ul className="mt-1.5 space-y-0.5 text-[11px] text-slate-300">
+                          {srm.legs.map((leg, i) => (
+                            <li key={i} className="flex justify-between">
+                              <span>
+                                #{leg.runner_number} {leg.name} — <strong>{leg.market}</strong>
+                              </span>
+                              <span className="tabular-nums text-slate-400">{(leg.prob * 100).toFixed(0)}%</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
 
