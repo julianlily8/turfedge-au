@@ -117,10 +117,22 @@ export function computeCoverageAudit(
 }
 
 export interface ProfitabilityFilters {
+  state: string;          // 'All' | 'NSW' | 'VIC' | 'QLD' | 'SA' | 'WA' | 'TAS'
   trackCondition: string; // 'All' | 'Firm' | 'Good' | 'Soft' | 'Heavy'
   distanceBand: string;   // 'All' | 'Sprint' | 'Middle' | 'Staying'
   flucDirection: string;  // 'All' | 'Firmer' | 'Steady' | 'Drifter'
   tier: string;           // 'All' | 'Metro' | 'Provincial'
+}
+
+export interface StateCoverageRow {
+  state: string;
+  raceCount: number;
+  avgLiveFactors: number;
+  totalFactors: number;
+  hasTrialsAndStewards: boolean;
+  winAll: { bets: number; wins: number; netProfit: number; potPct: number };
+  winOverlay: { bets: number; wins: number; netProfit: number; potPct: number };
+  exacta: { bets: number; wins: number; netProfit: number; potPct: number };
 }
 
 export interface BetCategoryMetrics {
@@ -447,11 +459,95 @@ export function overrideKey(settlementId: string, betKey: string): string {
   return `${settlementId}::${betKey}`;
 }
 
+const FALLBACK_VENUE_STATE: Record<string, string> = {
+  wyong: 'NSW',
+  hawkesbury: 'NSW',
+  canterbury: 'NSW',
+  'canterbury park': 'NSW',
+  randwick: 'NSW',
+  'royal randwick': 'NSW',
+  rosehill: 'NSW',
+  'warwick farm': 'NSW',
+  newcastle: 'NSW',
+  gosford: 'NSW',
+  'kembla grange': 'NSW',
+  geelong: 'VIC',
+  'ladbrokes geelong': 'VIC',
+  mornington: 'VIC',
+  pakenham: 'VIC',
+  flemington: 'VIC',
+  caulfield: 'VIC',
+  sandown: 'VIC',
+  'moonee valley': 'VIC',
+  cranbourne: 'VIC',
+  bendigo: 'VIC',
+  ballarat: 'VIC',
+  ipswich: 'QLD',
+  doomben: 'QLD',
+  'eagle farm': 'QLD',
+  'sunshine coast': 'QLD',
+  'gold coast': 'QLD',
+  launceston: 'TAS',
+  hobart: 'TAS',
+  morphettville: 'SA',
+  ascot: 'WA',
+  belmont: 'WA',
+};
+
+export function buildStateLookup(
+  auditMeetings: MeetingDoc[] = [],
+  auditRaces: RaceDoc[] = []
+): Map<string, string> {
+  const map = new Map<string, string>();
+  auditMeetings.forEach((m) => {
+    const st = (m.state || '').trim().toUpperCase();
+    if (!st) return;
+    if (m.date && m.meeting_slug) map.set(`${m.date}_${m.meeting_slug}`, st);
+    if (m.meeting_slug) map.set(m.meeting_slug.toLowerCase(), st);
+    if (m.name) map.set(m.name.toLowerCase(), st);
+    if (m.display_name) map.set(m.display_name.toLowerCase(), st);
+  });
+  auditRaces.forEach((r) => {
+    const st = (r.state || '').trim().toUpperCase();
+    if (!st) return;
+    if (r.race_id) map.set(r.race_id, st);
+    if (r.date && r.meeting_slug) map.set(`${r.date}_${r.meeting_slug}`, st);
+    if (r.meeting_slug) map.set(r.meeting_slug.toLowerCase(), st);
+    if (r.meeting_name) map.set(r.meeting_name.toLowerCase(), st);
+  });
+  return map;
+}
+
+export function resolveSettlementState(
+  s: SettlementDoc,
+  stateLookup: Map<string, string>
+): string {
+  if (s.race_id && stateLookup.has(s.race_id)) return stateLookup.get(s.race_id)!;
+  if (s.date && s.meeting_slug && stateLookup.has(`${s.date}_${s.meeting_slug}`)) {
+    return stateLookup.get(`${s.date}_${s.meeting_slug}`)!;
+  }
+  if (s.meeting_slug && stateLookup.has(s.meeting_slug.toLowerCase())) {
+    return stateLookup.get(s.meeting_slug.toLowerCase())!;
+  }
+  const mName = (s.meeting_name || '').trim().toLowerCase();
+  if (mName && stateLookup.has(mName)) return stateLookup.get(mName)!;
+  if (mName && FALLBACK_VENUE_STATE[mName]) return FALLBACK_VENUE_STATE[mName];
+  const slug = (s.meeting_slug || '').trim().toLowerCase();
+  if (slug && FALLBACK_VENUE_STATE[slug]) return FALLBACK_VENUE_STATE[slug];
+  return 'AUS';
+}
+
 export function filterSettlements(
   settlements: SettlementDoc[],
-  filters: ProfitabilityFilters
+  filters: ProfitabilityFilters,
+  stateLookup?: Map<string, string>
 ): SettlementDoc[] {
+  const lookup = stateLookup || new Map<string, string>();
   return settlements.filter((s) => {
+    if (filters.state && filters.state !== 'All') {
+      const st = resolveSettlementState(s, lookup);
+      if (st !== filters.state) return false;
+    }
     if (filters.tier !== 'All' && s.tier !== filters.tier) return false;
     if (filters.trackCondition !== 'All' && s.track_condition_band !== filters.trackCondition) return false;
     // Quaddies span multiple distances/flucs, include them unless distance/fluc filter explicitly excludes
@@ -488,6 +584,8 @@ export function computeProfitability(
 ): {
   categories: BetCategoryMetrics[];
   overall: BetCategoryMetrics;
+  topVehicle: BetCategoryMetrics | null;
+  settledRaceCount: number;
   cumulative: CumulativePoint[];
   factorDiagnostics: FactorDiagnostic[];
   totalWinCount: number;
@@ -718,5 +816,143 @@ export function computeProfitability(
     };
   }).sort((a, b) => Number(b.hasLiveData) - Number(a.hasLiveData) || b.edgeDelta - a.edgeDelta);
 
-  return { categories, overall, cumulative, factorDiagnostics, totalWinCount };
+  const settledRaceCount = settlements.filter((s) => s.kind === 'race').length;
+  const activeCategories = categories.filter((c) => c.bets > 0);
+  const topVehicle =
+    activeCategories.length > 0
+      ? [...activeCategories].sort(
+          (a, b) => b.potPct - a.potPct || b.netProfit - a.netProfit || b.bets - a.bets
+        )[0]
+      : null;
+
+  return { categories, overall, topVehicle, settledRaceCount, cumulative, factorDiagnostics, totalWinCount };
+}
+
+export function computeStateCoverageBreakdown(
+  settlements: SettlementDoc[],
+  auditMeetings: MeetingDoc[],
+  auditRaces: RaceDoc[],
+  overrides: OddsOverrideMap
+): StateCoverageRow[] {
+  const stateLookup = buildStateLookup(auditMeetings, auditRaces);
+  const raceById = new Map<string, RaceDoc>();
+  auditRaces.forEach((r) => raceById.set(r.race_id, r));
+
+  interface Acc {
+    raceCount: number;
+    liveFactorSum: number;
+    liveFactorSamples: number;
+    hasTrialsAndStewards: boolean;
+    winAll: { bets: number; wins: number; staked: number; ret: number };
+    winOverlay: { bets: number; wins: number; staked: number; ret: number };
+    exacta: { bets: number; wins: number; staked: number; ret: number };
+  }
+
+  const byState = new Map<string, Acc>();
+  const getAcc = (st: string): Acc => {
+    let acc = byState.get(st);
+    if (!acc) {
+      acc = {
+        raceCount: 0,
+        liveFactorSum: 0,
+        liveFactorSamples: 0,
+        hasTrialsAndStewards: st === 'NSW',
+        winAll: { bets: 0, wins: 0, staked: 0, ret: 0 },
+        winOverlay: { bets: 0, wins: 0, staked: 0, ret: 0 },
+        exacta: { bets: 0, wins: 0, staked: 0, ret: 0 },
+      };
+      byState.set(st, acc);
+    }
+    return acc;
+  };
+
+  settlements.forEach((s) => {
+    if (s.kind !== 'race') return;
+    const st = resolveSettlementState(s, stateLookup);
+    const acc = getAcc(st);
+    acc.raceCount += 1;
+
+    const rDoc = s.race_id ? raceById.get(s.race_id) : undefined;
+    if (rDoc && rDoc.scored_runners && rDoc.scored_runners.length > 0) {
+      rDoc.scored_runners.forEach((sr) => {
+        const audit = sr.audit_23pt || [];
+        if (audit.length > 0) {
+          const live = audit.filter((a) => a.has_data).length;
+          acc.liveFactorSum += live;
+          acc.liveFactorSamples += 1;
+          if (
+            audit.some(
+              (a) => (a.key === 'recent_trials' || a.key === 'stewards_comments') && a.has_data
+            )
+          ) {
+            acc.hasTrialsAndStewards = true;
+          }
+        }
+      });
+    } else if (s.top_runner_factor_scores) {
+      acc.liveFactorSum += Object.keys(s.top_runner_factor_scores).length;
+      acc.liveFactorSamples += 1;
+    }
+
+    const winVoid = Boolean(
+      s.win_all &&
+        (s.win_all.void ||
+          s.win_all.scratched ||
+          s.win_all.stake <= 0 ||
+          s.win_all.finish_position === null ||
+          s.win_all.finish_position === undefined)
+    );
+    if (s.win_all && !winVoid) {
+      const ov = overrides[overrideKey(s.settlement_id, 'win_all')];
+      const ret = effectiveReturn(s.win_all.won, s.win_all.stake, s.win_all.return, ov);
+      acc.winAll.bets += 1;
+      if (s.win_all.won) acc.winAll.wins += 1;
+      acc.winAll.staked += s.win_all.stake;
+      acc.winAll.ret += ret;
+    }
+    if (s.win_overlay && !winVoid && !s.win_overlay.void && s.win_overlay.stake > 0) {
+      const ov = overrides[overrideKey(s.settlement_id, 'win_all')];
+      const ret = effectiveReturn(s.win_overlay.won, s.win_overlay.stake, s.win_overlay.return, ov);
+      acc.winOverlay.bets += 1;
+      if (s.win_overlay.won) acc.winOverlay.wins += 1;
+      acc.winOverlay.staked += s.win_overlay.stake;
+      acc.winOverlay.ret += ret;
+    }
+    if (s.exacta && !s.exacta.void && !s.exacta.skipped && s.exacta.stake > 0) {
+      const ov = overrides[overrideKey(s.settlement_id, 'exacta')];
+      const ret = effectiveReturn(
+        s.exacta.won,
+        s.exacta.stake,
+        s.exacta.return,
+        ov,
+        s.exacta.flexi_pct
+      );
+      acc.exacta.bets += 1;
+      if (s.exacta.won) acc.exacta.wins += 1;
+      acc.exacta.staked += s.exacta.stake;
+      acc.exacta.ret += ret;
+    }
+  });
+
+  const finishBucket = (b: { bets: number; wins: number; staked: number; ret: number }) => {
+    const netProfit = Math.round((b.ret - b.staked) * 100) / 100;
+    const potPct = b.staked > 0 ? Math.round((netProfit / b.staked) * 1000) / 10 : 0;
+    return { bets: b.bets, wins: b.wins, netProfit, potPct };
+  };
+
+  return Array.from(byState.entries())
+    .map(([state, acc]) => ({
+      state,
+      raceCount: acc.raceCount,
+      avgLiveFactors:
+        acc.liveFactorSamples > 0
+          ? Math.round((acc.liveFactorSum / acc.liveFactorSamples) * 10) / 10
+          : 0,
+      totalFactors: FACTOR_DEFINITIONS.length,
+      hasTrialsAndStewards: acc.hasTrialsAndStewards,
+      winAll: finishBucket(acc.winAll),
+      winOverlay: finishBucket(acc.winOverlay),
+      exacta: finishBucket(acc.exacta),
+    }))
+    .sort((a, b) => b.raceCount - a.raceCount || a.state.localeCompare(b.state));
 }

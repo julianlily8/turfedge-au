@@ -309,13 +309,33 @@ export function TabUpcoming({
             <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 lg:col-span-2">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <span className="rounded-md bg-emerald-500/20 px-2 py-0.5 text-xs font-bold text-emerald-300">
                       {activeRace.tier.toUpperCase()}
                     </span>
                     <span className="text-xs font-semibold text-slate-400">
                       {activeRace.meeting_name} ({activeRace.state}) · Race {activeRace.race_number}
                     </span>
+                    {(() => {
+                      const hasNswFreefieldsIntel =
+                        (activeRace.state || '').toUpperCase() === 'NSW' &&
+                        (activeRace.scored_runners || []).some((sr) =>
+                          (sr.audit_23pt || []).some(
+                            (a) =>
+                              (a.key === 'recent_trials' || a.key === 'stewards_comments') &&
+                              a.has_data
+                          )
+                        );
+                      return hasNswFreefieldsIntel ? (
+                        <span className="rounded-full border border-emerald-500/35 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                          NSW · Trials &amp; Stewards Live
+                        </span>
+                      ) : (
+                        <span className="rounded-full border border-slate-700 bg-slate-800/80 px-2 py-0.5 text-[10px] font-medium text-slate-400">
+                          {activeRace.state || 'AUS'} · Core Form (No Trials/Stewards)
+                        </span>
+                      );
+                    })()}
                     {activeRace.pre_jump_analyzed || activeRace.baseline_analyzed ? (
                       <span className="inline-flex items-center gap-1 rounded-full bg-sky-500/15 px-2 py-0.5 text-[10px] font-semibold text-sky-300">
                         24-PT AUDITED

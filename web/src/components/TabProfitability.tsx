@@ -27,8 +27,10 @@ import type { MeetingDoc, RaceDoc, SettlementDoc } from '../lib/types';
 import {
   COMBINED_CATEGORY_OPTIONS,
   MIN_SAMPLE_WINS_FOR_TUNING,
+  buildStateLookup,
   computeCoverageAudit,
   computeProfitability,
+  computeStateCoverageBreakdown,
   filterSettlements,
   formatOrdinal,
   getLedgerBetDetails,
@@ -59,6 +61,22 @@ const LEDGER_BET_FILTERS: { key: string; label: string }[] = [
   { key: 'quaddie', label: 'Quaddie' },
 ];
 
+const STATE_FILTER_OPTIONS = [
+  { value: 'All', label: 'All States' },
+  { value: 'NSW', label: 'NSW' },
+  { value: 'VIC', label: 'VIC' },
+  { value: 'QLD', label: 'QLD' },
+  { value: 'SA', label: 'SA' },
+  { value: 'WA', label: 'WA' },
+  { value: 'TAS', label: 'TAS' },
+];
+
+const BREAKDOWN_SECTIONS: { title: string; keys: string[] }[] = [
+  { title: 'Straight Win & Overlays', keys: ['win_all', 'win_overlay'] },
+  { title: 'Same Race Multis', keys: ['srm_2leg', 'srm_3leg', 'srm_4leg'] },
+  { title: 'Exotics & Quaddies', keys: ['exacta', 'trifecta', 'first4', 'quaddie'] },
+];
+
 export function TabProfitability({
   settlements,
   auditMeetings = [],
@@ -67,6 +85,7 @@ export function TabProfitability({
   loading = false,
 }: Props) {
   const [filters, setFilters] = useState<ProfitabilityFilters>({
+    state: 'All',
     trackCondition: 'All',
     distanceBand: 'All',
     flucDirection: 'All',
@@ -96,11 +115,25 @@ export function TabProfitability({
     );
   };
 
-  const filtered = useMemo(() => filterSettlements(settlements, filters), [settlements, filters]);
+  const stateLookup = useMemo(
+    () => buildStateLookup(auditMeetings, auditRaces),
+    [auditMeetings, auditRaces]
+  );
+
+  const filtered = useMemo(
+    () => filterSettlements(settlements, filters, stateLookup),
+    [settlements, filters, stateLookup]
+  );
   const stats = useMemo(
     () => computeProfitability(filtered, overrides, selectedCombinedKeys),
     [filtered, overrides, selectedCombinedKeys]
   );
+  const stateBreakdown = useMemo(
+    () => computeStateCoverageBreakdown(filtered, auditMeetings, auditRaces, overrides),
+    [filtered, auditMeetings, auditRaces, overrides]
+  );
+  const avgStakePerRace =
+    stats.settledRaceCount > 0 ? stats.overall.totalStaked / stats.settledRaceCount : 0;
 
   const ledgerRows = useMemo(() => {
     return filtered
@@ -239,7 +272,21 @@ export function TabProfitability({
           </span>
         </div>
 
-        <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-5">
+          <div>
+            <label className="mb-1 block text-[11px] font-semibold uppercase text-slate-400">
+              State / Jurisdiction
+            </label>
+            <select
+              value={filters.state}
+              onChange={(e) => setFilters({ ...filters, state: e.target.value })}
+              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-slate-100 focus:border-emerald-500 focus:outline-none"
+            >
+              {STATE_FILTER_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          </div>
           <div>
             <label className="mb-1 block text-[11px] font-semibold uppercase text-slate-400">Track Condition</label>
             <select
@@ -325,7 +372,7 @@ export function TabProfitability({
       </div>
 
       {/* Top KPI Cards */}
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
           <div className="flex items-center justify-between text-xs text-slate-400">
             <span>Combined Net P/L ($10 Units)</span>
@@ -359,6 +406,33 @@ export function TabProfitability({
           <div className="mt-1 text-xs text-slate-400 tabular-nums">
             {stats.overall.wins}/{stats.overall.bets} bets won ({stats.overall.strikeRatePct.toFixed(1)}% SR)
           </div>
+        </div>
+
+        <div className="rounded-2xl border border-amber-500/30 bg-amber-950/15 p-4">
+          <div className="flex items-center justify-between text-xs text-amber-300">
+            <span>Top Vehicle (POT%)</span>
+            <Trophy className="h-4 w-4 text-amber-400" />
+          </div>
+          {stats.topVehicle ? (
+            <>
+              <div
+                className={`mt-1 text-2xl font-black tabular-nums ${
+                  stats.topVehicle.potPct >= 0 ? 'text-emerald-300' : 'text-amber-300'
+                }`}
+              >
+                {stats.topVehicle.potPct >= 0 ? '+' : ''}
+                {stats.topVehicle.potPct.toFixed(1)}% POT
+              </div>
+              <div className="mt-1 truncate text-xs text-slate-200 tabular-nums" title={stats.topVehicle.label}>
+                <strong className="text-amber-200">{stats.topVehicle.label.replace(' ($10 Flexi)', '').replace(' · 0.75x', '')}</strong>
+              </div>
+              <div className="mt-0.5 text-[11px] text-slate-400 tabular-nums">
+                Net {stats.topVehicle.netProfit >= 0 ? '+' : ''}${stats.topVehicle.netProfit.toFixed(2)} · {stats.topVehicle.wins}/{stats.topVehicle.bets} bets
+              </div>
+            </>
+          ) : (
+            <div className="mt-2 text-xs text-slate-500">No settled bets</div>
+          )}
         </div>
 
         <div className="rounded-2xl border border-emerald-500/30 bg-emerald-950/20 p-4">
@@ -400,10 +474,13 @@ export function TabProfitability({
         </div>
       </div>
 
-      {/* Category Breakdown Table */}
+      {/* Category Breakdown Table (Grouped by Vehicle Type + Dynamic Selected Rollup Footer) */}
       <div className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/70">
-        <div className="border-b border-slate-800 px-4 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 px-4 py-3">
           <h3 className="text-sm font-bold text-white">Profitability Breakdown by Bet Type ($10 Standardized Units)</h3>
+          <span className="text-[11px] text-slate-400">
+            Bottom rollup sums only checked categories above ({selectedCombinedKeys.length} selected)
+          </span>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
@@ -420,41 +497,217 @@ export function TabProfitability({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/70 tabular-nums">
-              {stats.categories.map((c) => (
-                <tr key={c.key} className="hover:bg-slate-800/40">
-                  <td className="px-4 py-2.5 font-semibold text-slate-100">{c.label}</td>
-                  <td className="px-4 py-2.5 text-right text-slate-300">{c.bets}</td>
-                  <td className="px-4 py-2.5 text-right text-slate-300">{c.wins}</td>
-                  <td className="px-4 py-2.5 text-right text-slate-300">{c.strikeRatePct.toFixed(1)}%</td>
-                  <td className="px-4 py-2.5 text-right text-slate-300">${c.totalStaked.toFixed(2)}</td>
-                  <td className="px-4 py-2.5 text-right text-slate-200">${c.totalReturn.toFixed(2)}</td>
-                  <td
-                    className={`px-4 py-2.5 text-right font-bold ${
-                      c.netProfit > 0 ? 'text-emerald-400' : c.netProfit < 0 ? 'text-rose-400' : 'text-slate-400'
+              {BREAKDOWN_SECTIONS.map((sec) => {
+                const sectionRows = sec.keys
+                  .map((k) => stats.categories.find((c) => c.key === k))
+                  .filter((c): c is NonNullable<typeof c> => Boolean(c));
+                return (
+                  <React.Fragment key={sec.title}>
+                    <tr className="bg-slate-950/80">
+                      <td
+                        colSpan={8}
+                        className="px-4 py-1.5 text-[10px] font-bold uppercase tracking-wider text-emerald-400/90"
+                      >
+                        {sec.title}
+                      </td>
+                    </tr>
+                    {sectionRows.map((c) => {
+                      const isIncluded = selectedCombinedKeys.includes(c.key);
+                      return (
+                        <tr
+                          key={c.key}
+                          className={`hover:bg-slate-800/40 ${isIncluded ? 'bg-emerald-950/15' : ''}`}
+                        >
+                          <td className="px-4 py-2.5 font-semibold text-slate-100">
+                            <span className="inline-flex items-center gap-2">
+                              <span
+                                className={`h-1.5 w-1.5 rounded-full ${
+                                  isIncluded ? 'bg-emerald-400' : 'bg-slate-700'
+                                }`}
+                                title={isIncluded ? 'Included in Selected Rollup Total' : 'Not selected in rollup'}
+                              />
+                              {c.label}
+                            </span>
+                          </td>
+                          <td className="px-4 py-2.5 text-right text-slate-300">{c.bets}</td>
+                          <td className="px-4 py-2.5 text-right text-slate-300">{c.wins}</td>
+                          <td className="px-4 py-2.5 text-right text-slate-300">{c.strikeRatePct.toFixed(1)}%</td>
+                          <td className="px-4 py-2.5 text-right text-slate-300">${c.totalStaked.toFixed(2)}</td>
+                          <td className="px-4 py-2.5 text-right text-slate-200">${c.totalReturn.toFixed(2)}</td>
+                          <td
+                            className={`px-4 py-2.5 text-right font-bold ${
+                              c.netProfit > 0 ? 'text-emerald-400' : c.netProfit < 0 ? 'text-rose-400' : 'text-slate-400'
+                            }`}
+                          >
+                            {c.netProfit >= 0 ? '+' : ''}${c.netProfit.toFixed(2)}
+                          </td>
+                          <td className="px-4 py-2.5 text-right">
+                            <span
+                              className={`inline-block rounded-full px-2 py-0.5 text-[11px] font-bold ${
+                                c.potPct > 0
+                                  ? 'bg-emerald-500/15 text-emerald-300'
+                                  : c.potPct < 0
+                                  ? 'bg-rose-500/15 text-rose-300'
+                                  : 'bg-slate-800 text-slate-400'
+                              }`}
+                            >
+                              {c.potPct >= 0 ? '+' : ''}
+                              {c.potPct.toFixed(1)}%
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+            <tfoot className="border-t-2 border-slate-700 bg-slate-950/90 tabular-nums">
+              <tr>
+                <td className="px-4 py-3 font-extrabold text-white">
+                  Selected Rollup Total ({selectedCombinedKeys.length} bet type{selectedCombinedKeys.length === 1 ? '' : 's'} · avg ${avgStakePerRace.toFixed(1)}/race)
+                </td>
+                <td className="px-4 py-3 text-right font-bold text-slate-200">{stats.overall.bets}</td>
+                <td className="px-4 py-3 text-right font-bold text-slate-200">{stats.overall.wins}</td>
+                <td className="px-4 py-3 text-right font-bold text-slate-200">{stats.overall.strikeRatePct.toFixed(1)}%</td>
+                <td className="px-4 py-3 text-right font-bold text-slate-100">${stats.overall.totalStaked.toFixed(2)}</td>
+                <td className="px-4 py-3 text-right font-bold text-slate-100">${stats.overall.totalReturn.toFixed(2)}</td>
+                <td
+                  className={`px-4 py-3 text-right font-extrabold ${
+                    stats.overall.netProfit > 0
+                      ? 'text-emerald-400'
+                      : stats.overall.netProfit < 0
+                      ? 'text-rose-400'
+                      : 'text-slate-300'
+                  }`}
+                >
+                  {stats.overall.netProfit >= 0 ? '+' : ''}${stats.overall.netProfit.toFixed(2)}
+                </td>
+                <td className="px-4 py-3 text-right">
+                  <span
+                    className={`inline-block rounded-full px-2.5 py-0.5 text-[11px] font-extrabold ${
+                      stats.overall.potPct > 0
+                        ? 'bg-emerald-500/20 text-emerald-300'
+                        : stats.overall.potPct < 0
+                        ? 'bg-rose-500/20 text-rose-300'
+                        : 'bg-slate-800 text-slate-300'
                     }`}
                   >
-                    {c.netProfit >= 0 ? '+' : ''}${c.netProfit.toFixed(2)}
-                  </td>
-                  <td className="px-4 py-2.5 text-right">
-                    <span
-                      className={`inline-block rounded-full px-2 py-0.5 text-[11px] font-bold ${
-                        c.potPct > 0
-                          ? 'bg-emerald-500/15 text-emerald-300'
-                          : c.potPct < 0
-                          ? 'bg-rose-500/15 text-rose-300'
-                          : 'bg-slate-800 text-slate-400'
-                      }`}
-                    >
-                      {c.potPct >= 0 ? '+' : ''}
-                      {c.potPct.toFixed(1)}%
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
+                    {stats.overall.potPct >= 0 ? '+' : ''}
+                    {stats.overall.potPct.toFixed(1)}%
+                  </span>
+                </td>
+              </tr>
+            </tfoot>
           </table>
         </div>
       </div>
+
+      {/* Performance by State & Factor Coverage Summary */}
+      {stateBreakdown.length > 0 && (
+        <div className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/70">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 px-4 py-3">
+            <div>
+              <h3 className="text-sm font-bold text-white">Performance by State &amp; Factor Coverage</h3>
+              <p className="text-[11px] text-slate-400">
+                Jurisdiction-level factor depth (NSW includes FreeFields Trials &amp; Stewards intel vs Core Form in non-NSW states).
+              </p>
+            </div>
+            <span className="text-[11px] text-slate-400">{stateBreakdown.length} state(s)</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="border-b border-slate-800 bg-slate-950/60 text-[11px] uppercase tracking-wider text-slate-400">
+                <tr>
+                  <th className="px-4 py-2">State</th>
+                  <th className="px-4 py-2">Avg Live Factors</th>
+                  <th className="px-4 py-2 text-right">Settled Races</th>
+                  <th className="px-4 py-2 text-right">Win (All) POT%</th>
+                  <th className="px-4 py-2 text-right">Win Overlay POT%</th>
+                  <th className="px-4 py-2 text-right">Exacta POT%</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/70 tabular-nums">
+                {stateBreakdown.map((row) => (
+                  <tr key={row.state} className="hover:bg-slate-800/40">
+                    <td className="px-4 py-2.5 font-bold text-white">
+                      <span className="inline-flex items-center gap-2">
+                        <span>{row.state}</span>
+                        {row.hasTrialsAndStewards ? (
+                          <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-bold uppercase text-emerald-300 ring-1 ring-emerald-500/30">
+                            Trials &amp; Stewards
+                          </span>
+                        ) : (
+                          <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-slate-400 ring-1 ring-slate-700">
+                            Core Form
+                          </span>
+                        )}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2.5 text-slate-200">
+                      <span className="font-semibold text-emerald-300">
+                        {row.avgLiveFactors.toFixed(1)}/{row.totalFactors} Live
+                      </span>
+                    </td>
+                    <td className="px-4 py-2.5 text-right text-slate-300">{row.raceCount}</td>
+                    <td className="px-4 py-2.5 text-right">
+                      {row.winAll.bets > 0 ? (
+                        <span
+                          className={`font-bold ${
+                            row.winAll.potPct >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                          }`}
+                        >
+                          {row.winAll.potPct >= 0 ? '+' : ''}
+                          {row.winAll.potPct.toFixed(1)}%{' '}
+                          <span className="font-normal text-slate-500">
+                            ({row.winAll.wins}/{row.winAll.bets})
+                          </span>
+                        </span>
+                      ) : (
+                        <span className="text-slate-500">—</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-2.5 text-right">
+                      {row.winOverlay.bets > 0 ? (
+                        <span
+                          className={`font-bold ${
+                            row.winOverlay.potPct >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                          }`}
+                        >
+                          {row.winOverlay.potPct >= 0 ? '+' : ''}
+                          {row.winOverlay.potPct.toFixed(1)}%{' '}
+                          <span className="font-normal text-slate-500">
+                            ({row.winOverlay.wins}/{row.winOverlay.bets})
+                          </span>
+                        </span>
+                      ) : (
+                        <span className="text-slate-500">—</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-2.5 text-right">
+                      {row.exacta.bets > 0 ? (
+                        <span
+                          className={`font-bold ${
+                            row.exacta.potPct >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                          }`}
+                        >
+                          {row.exacta.potPct >= 0 ? '+' : ''}
+                          {row.exacta.potPct.toFixed(1)}%{' '}
+                          <span className="font-normal text-slate-500">
+                            ({row.exacta.wins}/{row.exacta.bets})
+                          </span>
+                        </span>
+                      ) : (
+                        <span className="text-slate-500">—</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* Split Cumulative Net P/L Curves: Chart 1 (Win & SRMs) + Chart 2 (Exotics) */}
       <div className="grid gap-4 lg:grid-cols-2">
